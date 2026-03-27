@@ -34,7 +34,7 @@ async def check_quake_job(bot):
                f"Kedalaman: {data['Kedalaman']}\n"
                f"Wilayah: {data['Wilayah']}\n"
                f"Potensi: {data['Potensi']}")
-        img_url = data['Shakemap']
+        img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
         
         for user in users:
             try:

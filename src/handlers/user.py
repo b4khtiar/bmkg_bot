@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.filters import CommandStart, Command
 from database import add_user, get_bot_mode, is_user_whitelisted, update_user_location, get_user_info
 from utils.keyboards import get_province_keyboard, get_city_keyboard, get_start_keyboard
-from services.bmkg_api import fetch_weather_data, parse_weather_data
+from services.bmkg_api import fetch_weather_data, parse_weather_data, fetch_latest_quake
 import os
 
 router = Router()
@@ -73,17 +73,23 @@ async def cmd_current_weather(message: types.Message):
     if not raw_data:
         return await message.answer("Gagal mengambil data cuaca. Silakan coba lagi nanti.")
     
-    msg = parse_weather_data(raw_data, "Saat Ini") # Gunakan parser yang sudah ada
+    msg = parse_weather_data(raw_data, "Saat Ini")
     await message.answer(msg, parse_mode="HTML")
 
 @router.message(Command("gempa"))
 async def cmd_earthquake(message: types.Message):
     # Ambil data gempa terkini dari API
-    raw_data = await fetch_earthquake_data()
+    raw_data = await fetch_latest_quake()
     
     # periksa apakah data ada
     if not raw_data:
         return await message.answer("Gagal mengambil data gempa. Silakan coba lagi nanti.")
-    
-    msg = parse_earthquake_data(raw_data) # Gunakan parser yang sudah ada
-    await message.answer(msg, parse_mode="HTML")
+    msg = (f"<b>⚠️ GEMPA BUMI TERKINI</b>\n\n"
+           f"🗓️ {raw_data['Tanggal']} {raw_data['Jam']}\n"
+           f"Magnitudo: {raw_data['Magnitude']}\n"
+           f"Kedalaman: {raw_data['Kedalaman']}\n"
+           f"Wilayah: {raw_data['Wilayah']}\n"
+           f"Potensi: {raw_data['Potensi']}")
+    img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
+
+    await message.answer_photo(photo=img_url, caption=msg, parse_mode="HTML")
