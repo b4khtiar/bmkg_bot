@@ -20,16 +20,18 @@ def parse_weather_daily_brief(json_response):
         for i, label in enumerate(labels):
             if i < len(weather_list):
                 w = weather_list[i]
-                icon = WEATHER_EMOJI.get(str(w['weather']), "☁️")
+                weather_desc = w.get('weather_desc', '')
+                icon = WEATHER_EMOJI.get(str(w['weather']), '❓')
                 temp = f"{w['t']}°C"
-                summary_points.append(f"{label} {icon} {temp}")
+                summary_points.append(f"🕒 <b>{label}</b>\n{icon} {weather_desc} | {temp}")
 
         # Gabungkan
-        grid_view = "\n".join(summary_points)
+        grid_view = "\n\n".join(summary_points)
         
         msg = (
-            f"<b>📅 DAILY BRIEFING:</b>\n{lokasi.get('desa')}\n\n"
-            f"<code>{grid_view}</code>\n\n"
+            f"📅 <b>PRAKIRAAN CUACA HARI INI</b>\n"
+            f"📍 <b>{lokasi.get('desa')}</b>\n\n"
+            f"{grid_view}\n\n"
             f"💡 <i>Tip: Cuaca hari ini didominasi {weather_list[0]['weather_desc']}.</i>"
         )
         return msg
@@ -82,11 +84,11 @@ def parse_weather_data(json_response, time_label):
         msg = (f"<b>🌤️ LAPORAN CUACA {time_label.upper()}</b>\n"
                f"📍 {nama_tempat}\n"
                f"📅 {selected.get('local_datetime')}\n\n"
-               f"Kondisi: <b>{status_emoji}</b>\n"
-               f"Suhu: {temp}°C\n"
-               f"Kelembapan: {hu}%\n"
-               f"Angin: {ws} km/jam (Arah {wd})\n\n"
-               f"<i>Sumber: BMKG</i>")
+               f"📉 Kondisi: <b>{status_emoji}</b>\n"
+               f"🌡️ Suhu: <code>{temp}°C</code>\n"
+               f"💧 Kelembapan: <code>{hu}%</code>\n"
+               f"💨 Angin: <code>{ws} km/jam</code> (Arah <code>{wd}</code>)\n\n"
+               f"<i> 📡 Sumber: BMKG</i>")
         return msg
     except (IndexError, KeyError, TypeError) as e:
         return f"⚠️ Gagal memproses data cuaca wilayah ini. ({e})"

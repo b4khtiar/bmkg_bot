@@ -85,11 +85,11 @@ async def cmd_earthquake(message: types.Message):
     if not raw_data:
         return await message.answer("Gagal mengambil data gempa. Silakan coba lagi nanti.")
     msg = (f"<b>⚠️ GEMPA BUMI TERKINI</b>\n\n"
-           f"🗓️ {raw_data['Tanggal']} {raw_data['Jam']}\n"
-           f"Magnitudo: {raw_data['Magnitude']}\n"
-           f"Kedalaman: {raw_data['Kedalaman']}\n"
-           f"Wilayah: {raw_data['Wilayah']}\n"
-           f"Potensi: {raw_data['Potensi']}")
+           f"🗓️ {raw_data['Tanggal']} - {raw_data['Jam']}\n"
+           f"📈 Magnitudo: <code>{raw_data['Magnitude']}</code>\n"
+           f"📉 Kedalaman: <code>{raw_data['Kedalaman']}</code>\n"
+           f"📍 Wilayah: <code>{raw_data['Wilayah']}</code>\n"
+           f"📌 Potensi: <code>{raw_data['Potensi']}</code>")
     img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
 
     await message.answer_photo(photo=img_url, caption=msg, parse_mode="HTML")

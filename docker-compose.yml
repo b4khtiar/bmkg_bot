@@ -6,13 +6,13 @@ services:
     container_name: pantau_bmkg_bot
     restart: always
     environment:
-      - BOT_TOKEN=${BOT_TOKEN} # Ganti dengan token dari BotFather
-      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID} # ID Telegram kamu
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
       - TZ=Asia/Jakarta # Set zona waktu container
     volumes:
       - ./data:/app/data:z
       - ./src:/app/src:z
-    mem_limit: 256m
+    mem_limit: 192m
     logging:
       driver: "json-file"
       options:

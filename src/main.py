@@ -28,13 +28,14 @@ async def check_quake_job(bot):
         
         # Broadcast ke semua user
         users = await get_all_users()
-        msg = (f"<b>⚠️ ALERT GEMPA</b>\n\n"
+        msg = (f"<b>⚠️ INFO GEMPA TERKINI</b>\n\n"
                f"🗓️ {data['Tanggal']} {data['Jam']}\n"
-               f"Magnitudo: {data['Magnitude']}\n"
-               f"Kedalaman: {data['Kedalaman']}\n"
-               f"Wilayah: {data['Wilayah']}\n"
-               f"Potensi: {data['Potensi']}")
-        img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
+               f"📈 Magnitudo: <code>{data['Magnitude']}</code>\n"
+               f"📉 Kedalaman: <code>{data['Kedalaman']}</code>\n"
+               f"📍 Wilayah: <code>{data['Wilayah']}</code>\n"
+               f"📌 Potensi: <code>{data['Potensi']}</code>\n\n"
+               "🚨 <i>Tetap tenang dan hindari bangunan beresiko.</i>")
+        img_url = f"https://static.bmkg.go.id/{data['Shakemap']}"
         
         for user in users:
             try:
@@ -101,10 +102,10 @@ async def nowcast_alert_job(bot):
                 is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
                 
                 if is_new:
-                    msg = (f"<b>🚨 PERINGATAN DINI (NOWCASTING)</b>\n\n"
+                    msg = (f"🚨 <b>PERINGATAN DINI (NOWCASTING)</b>\n\n"
                            f"📢 <b>{alert['headline']}</b>\n\n"
                            f"{alert['description']}\n\n"
-                           f"⏳ Berlaku hingga: {alert['expires']}\n\n"
+                           f"⏰ Berlaku hingga: {alert['expires']}\n\n"
                            f"<i>Sumber: BMKG</i>")
                     
                     try:
@@ -133,7 +134,6 @@ async def main():
         scheduler.add_job(check_quake_job, "interval", minutes=1, args=[bot])
         scheduler.add_job(daily_weather_job, "cron", hour=6, minute=30, args=[bot, "Pagi"])
         scheduler.add_job(daily_weather_job, "cron", hour=17, minute=0, args=[bot, "Sore"])
-        # scheduler.add_job(weather_alert_job, "interval", minutes=20, args=[bot])
         scheduler.add_job(nowcast_alert_job, "interval", minutes=15, args=[bot])
         scheduler.add_job(cleanup_old_metadata, "cron", day_of_week='sun', hour=0)
         

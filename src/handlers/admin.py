@@ -20,7 +20,7 @@ async def cmd_admin_panel(message: types.Message):
         "<b>🛠 CONTROL PANEL ADMIN</b>\n\n"
         f"👥 Total User: {user_count}\n"
         f"🤖 Mode: {current_mode}\n"
-        "Silakan pilih mode di bawah untuk mengubah akses pengguna:"
+        "Pilih mode di bawah untuk mengubah akses pengguna:"
     )
     
     await message.answer(text, reply_markup=get_admin_panel_keyboard(current_mode), parse_mode="HTML")
