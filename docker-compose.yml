@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  bmkg-bot:
+    build: .
+    container_name: pantau_bmkg_bot
+    restart: always
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN} # Ganti dengan token dari BotFather
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID} # ID Telegram kamu
+      - TZ=Asia/Jakarta # Set zona waktu container
+    volumes:
+      - ./data:/app/data:z
+      - ./src:/app/src:z
+    mem_limit: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"
