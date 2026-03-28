@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from aiogram import Bot, Dispatcher
 from handlers import user, admin
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -71,24 +72,20 @@ async def nowcast_alert_job(bot):
     if not rss_data: return
 
     users = await get_all_users()
-    
+    # Tentukan SATU timestamp untuk seluruh putaran broadcast ini
+    session_ts = int(time.time())
+
     # Kumpulkan alert unik per wilayah agar tidak fetch detail berulang kali
     # key: city_name, value: list of detail_objects
     processed_alerts = {}
 
     for user in users:
-        code = user['adm_code'] # Contoh: "34.04"
-        # Dapatkan nama provinsi dari kode wilayah
-        # format { "provinsi": { "kode": "nama" } }
-        province = None
-        for prov, kode_map in REGION_DATA.items():
-            if code in kode_map:
-                province = prov
-                break
+        city_name = "Yogyakarta" # Default city name,
+        # TODO: Get valid city name from user's location
         
         # 1. Cari link relevan di RSS
-        links = parse_nowcast_rss(rss_data, province)
-        
+        links = parse_nowcast_rss(rss_data, city_name)
+        print(f"Links found for {city_name}: {links}")
         for link in links:
             # 2. Fetch detail jika belum diproses di putaran ini
             if link not in processed_alerts:
@@ -100,6 +97,8 @@ async def nowcast_alert_job(bot):
             if alert:
                 # 3. Deduplikasi menggunakan identifier unik CAP
                 is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
+                # Tambahkan timestamp ke image URL untuk cache busting
+                unique_img = f"{alert['image']}?t={session_ts}" if alert['image'] else None
                 
                 if is_new:
                     msg = (f"🚨 <b>PERINGATAN DINI (NOWCASTING)</b>\n\n"
@@ -109,8 +108,8 @@ async def nowcast_alert_job(bot):
                            f"<i>Sumber: BMKG</i>")
                     
                     try:
-                        if alert['image']:
-                            await bot.send_photo(user['chat_id'], photo=alert['image'], caption=msg, parse_mode="HTML")
+                        if unique_img:
+                            await bot.send_photo(user['chat_id'], photo=unique_img, caption=msg, parse_mode="HTML")
                         else:
                             await bot.send_message(user['chat_id'], msg, parse_mode="HTML")
                     except: continue

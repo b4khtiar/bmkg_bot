@@ -1,5 +1,6 @@
 import httpx
 import logging
+import random
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from utils.constants import WEATHER_CODES, WEATHER_EMOJI
@@ -28,15 +29,44 @@ def parse_weather_daily_brief(json_response):
         # Gabungkan
         grid_view = "\n\n".join(summary_points)
         
+        tips = generate_smart_insight(weather_list)
         msg = (
             f"📅 <b>PRAKIRAAN CUACA HARI INI</b>\n"
             f"📍 <b>{lokasi.get('desa')}</b>\n\n"
             f"{grid_view}\n\n"
-            f"💡 <i>Tip: Cuaca hari ini didominasi {weather_list[0]['weather_desc']}.</i>"
+            f"💡 <b>INSIGHT</b>\n{tips}"
         )
         return msg
     except:
-        return "Gagal memproses briefing pagi."
+        return "Gagal memproses briefing cuaca."
+
+def get_smart_insight(weather_list):
+    # Filter hanya untuk 4 waktu utama (07:00, 13:00, 16:00, 19:00)
+    data = weather_list[:4]
+    max_temp = max(int(w['t']) for w in data)
+    codes = [int(w['weather']) for w in data]
+    
+    # Prefix agar lebih manusiawi
+    prefixes = ["Saran hari ini:", "Insight untuk Anda:", "Info penting:", "Catatan rutin:"]
+    pref = random.choice(prefixes)
+
+    # Logika Prioritas (Urutkan dari yang paling berbahaya/penting)
+    if any(c in [95, 97] for c in codes):
+        return f"⚡ <b>{pref}</b> Ada potensi hujan petir. Pastikan perangkat elektronik terlindungi dan hindari berteduh di bawah pohon."
+
+    if any(c in [61, 63] for c in codes):
+        # Cek jika hujan di siang atau sore (waktu produktif)
+        if codes[1] >= 60 or codes[2] >= 60:
+            return f"🌧️ <b>{pref}</b> Siapkan jas hujan di kendaraan. Hujan diprediksi turun saat jam sibuk siang/sore nanti."
+        return f"🌦️ <b>{pref}</b> Sedia payung sebelum hujan. Cuaca hari ini diprediksi tidak menentu."
+
+    if max_temp >= 34:
+        return f"☀️ <b>{pref}</b> Suhu sangat terik (maks {max_temp}°C). Gunakan tabir surya jika beraktivitas luar ruangan dan cukupi hidrasi."
+
+    if all(c <= 3 for c in codes): # Dominasi Cerah/Berawan
+        return f"🧺 <b>{pref}</b> Hari yang cerah! Sangat ideal untuk menjemur pakaian atau agenda luar ruangan seharian."
+
+    return f"☁️ <b>{pref}</b> Cuaca cenderung stabil dan berawan. Tetap nyaman beraktivitas!"
 
 def parse_weather_data(json_response, time_label):
     """
@@ -93,7 +123,7 @@ def parse_weather_data(json_response, time_label):
     except (IndexError, KeyError, TypeError) as e:
         return f"⚠️ Gagal memproses data cuaca wilayah ini. ({e})"
 
-def parse_nowcast_rss(xml_string, user_city_name = "Yogyakarta"):
+def parse_nowcast_rss(xml_string, user_city_name):
     """
     Scan RSS untuk mencari berita yang relevan dengan kota user.
     """
@@ -102,11 +132,12 @@ def parse_nowcast_rss(xml_string, user_city_name = "Yogyakarta"):
     relevant_links = []
 
     for item in items:
+        description = item.find("description").text
         title = item.find("title").text
         link = item.find("link").text
         
         # Filter awal: Jika nama Kota/Kabupaten user ada di judul
-        if user_city_name.lower() in title.lower():
+        if user_city_name.lower() in title.lower() or user_city_name.lower() in description.lower():
             relevant_links.append(link)
             
     return relevant_links
@@ -121,36 +152,18 @@ def parse_cap_detail(xml_string):
     info = root.find("cap:info", ns)
     
     if info is not None:
+        expires_text = info.find("cap:expires", ns).text
+        # Convert ISO format to readable
+        readable_expires = expires_text.split("T")[0] + " " + expires_text.split("T")[1].split("+")[0]
         return {
             "id": root.find("cap:identifier", ns).text,
+            "severity": info.find("cap:severity", ns).text,
             "headline": info.find("cap:headline", ns).text,
             "description": info.find("cap:description", ns).text,
-            "instruction": "Tetap waspada, kurangi aktivitas luar ruangan.",
-            "expires": info.find("cap:expires", ns).text,
+            "expires": readable_expires,
             "image": info.find("cap:web", ns).text if info.find("cap:web", ns) is not None else None
         }
     return None
-
-def detect_weather_alert(json_response):
-    try:
-        # Ambil cuaca terdekat (index 0 atau 1)
-        weather_list = json_response.get('data', [])[0].get('cuaca', [])[0]
-        upcoming = weather_list[0] 
-        
-        weather_code = int(upcoming.get('weather', 0))
-        precip = float(upcoming.get('tp', 0)) # Curah hujan dalam mm
-
-        # Logika: Jika kode hujan lebat (63) atau hujan petir (95+)
-        # ATAU curah hujan > 5.0 mm dalam 3 jam
-        if weather_code in [63, 95, 97] or precip > 5.0:
-            return {
-                "status": "SIAGA ⚠️",
-                "desc": f"{upcoming.get('weather_desc')} (Presipitasi: {precip}mm)",
-                "time": upcoming.get('local_datetime')
-            }
-        return None
-    except:
-        return None
 
 async def fetch_weather_data(adm_code):
     url = f"https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4={adm_code}"
