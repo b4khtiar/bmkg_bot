@@ -1,6 +1,7 @@
 import httpx
 import logging
 import random
+import re
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from utils.constants import WEATHER_CODES, WEATHER_EMOJI
@@ -28,7 +29,7 @@ def parse_weather_daily_brief(json_response):
 
         # Gabungkan
         grid_view = "\n\n".join(summary_points)
-        
+        # print(grid_view)
         tips = generate_smart_insight(weather_list)
         msg = (
             f"📅 <b>PRAKIRAAN CUACA HARI INI</b>\n"
@@ -40,33 +41,67 @@ def parse_weather_daily_brief(json_response):
     except:
         return "Gagal memproses briefing cuaca."
 
-def get_smart_insight(weather_list):
-    # Filter hanya untuk 4 waktu utama (07:00, 13:00, 16:00, 19:00)
-    data = weather_list[:4]
-    max_temp = max(int(w['t']) for w in data)
-    codes = [int(w['weather']) for w in data]
+def generate_smart_insight(weather_list):
+    if not weather_list:
+        return "Tidak ada data cuaca tersedia."
+
+    temps = []
+    codes = []
+    tps = []
+    rainy_busy_hours = []
+
+    for w in weather_list:
+        try:
+            temp = float(w.get('t', 0))
+            code = int(w.get('weather', 0))
+            tp = float(w.get('tp', 0))
+            temps.append(temp)
+            codes.append(code)
+            tps.append(tp)
+            
+            # Extract hour from "2026-04-10 15:00:00" to check for "busy hours with rain"
+            local_datetime = w.get('local_datetime', '')
+            if local_datetime:
+                hour = int(local_datetime.split(' ')[1].split(':')[0])
+                # We consider 12:00 to 19:00 as busy/afternoon hours with rain (codes 60-67)
+                if 12 <= hour <= 19 and 60 <= code <= 67:
+                    rainy_busy_hours.append(hour)
+        except (IndexError, ValueError, TypeError):
+            pass
+
+    if not temps:
+        return "Tidak ada data cuaca tersedia."
+
+    max_temp = max(temps)
     
     # Prefix agar lebih manusiawi
-    prefixes = ["Saran hari ini:", "Insight untuk Anda:", "Info penting:", "Catatan rutin:"]
+    prefixes = ["Saran hari ini:", "Insight untuk Anda:", "Info penting:", "Catatan:"]
     pref = random.choice(prefixes)
 
-    # Logika Prioritas (Urutkan dari yang paling berbahaya/penting)
-    if any(c in [95, 97] for c in codes):
+    # 1. PRIORITY: Thunderstorms (WMO codes 95, 96, 97)
+    if any(c in [95, 96, 97] for c in codes):
         return f"⚡ <b>{pref}</b> Ada potensi hujan petir. Pastikan perangkat elektronik terlindungi dan hindari berteduh di bawah pohon."
 
-    if any(c in [61, 63] for c in codes):
-        # Cek jika hujan di siang atau sore (waktu produktif)
-        if codes[1] >= 60 or codes[2] >= 60:
-            return f"🌧️ <b>{pref}</b> Siapkan jas hujan di kendaraan. Hujan diprediksi turun saat jam sibuk siang/sore nanti."
-        return f"🌦️ <b>{pref}</b> Sedia payung sebelum hujan. Cuaca hari ini diprediksi tidak menentu."
+    # 2. PRIORITY: Rain (Codes in the 60s range)
+    if any(60 <= c <= 67 for c in codes):
+        # Check if rain is predicted during the afternoon/evening (busy hours)
+        is_busy_hour_rain = len(rainy_busy_hours) > 0
+        
+        if is_busy_hour_rain:
+            return f"🌧️ <b>{pref}</b> Siapkan jas hujan! Hujan diprediksi turun pada sore hari saat jam pulang kerja/aktivitas padat."
+        return f"🌦️ <b>{pref}</b> Sedia payung sebelum hujan. Cuaca hari ini diprediksi akan turun hujan."
 
+    # 3. PRIORITY: Extreme Heat
     if max_temp >= 34:
-        return f"☀️ <b>{pref}</b> Suhu sangat terik (maks {max_temp}°C). Gunakan tabir surya jika beraktivitas luar ruangan dan cukupi hidrasi."
+        return f"☀️ <b>{pref}</b> Suhu sangat terik (maks {max_temp}°C). Gunakan tabir surya dan pastikan cukup minum air putih."
 
-    if all(c <= 3 for c in codes): # Dominasi Cerah/Berawan
-        return f"🧺 <b>{pref}</b> Hari yang cerah! Sangat ideal untuk menjemur pakaian atau agenda luar ruangan seharian."
+    # 4. PRIORITY: Sunny / Good for Laundry
+    # Logic: Weather code is clear (0-3) AND precipitation (tp) is 0
+    if all(c <= 3 for c in codes) and all(tp <= 0.01 for tp in tps):
+        return f"🧺 <b>{pref}</b> Hari yang cerah! Sangat ideal untuk menjemur pakaian atau agenda luar ruangan."
 
-    return f"☁️ <b>{pref}</b> Cuaca cenderung stabil dan berawan. Tetap nyaman beraktivitas!"
+    # 5. DEFAULT: Cloudy/Stable
+    return f"☁️ <b>{pref}</b> Cuaca cenderung stabil dan berawan. Tetap nyaman untuk beraktivitas!"
 
 def parse_weather_data(json_response, time_label):
     """
@@ -142,6 +177,52 @@ def parse_nowcast_rss(xml_string, user_city_name):
             
     return relevant_links
 
+def parse_cap_description(text):
+    # 1. Extract Start Time/Date
+    # Pattern: looks for "pada [Date, Time WIB || WITA || WIT]"
+    time_pattern = r"akan terjadi pada ([\d\s\w,]+ (?:WIB|WITA|WIT))"
+    start_time = re.search(time_pattern, text)
+    start_time = start_time.group(1) if start_time else "Tidak diketahui"
+
+    # 2. Extract Region and Sub-districts
+    # Pattern: looks for "wilayah [Province], khususnya di [Sub-districts]. Kondisi"
+    region_pattern = r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi ini"
+    region_match = re.search(region_pattern, text)
+    
+    province = ""
+    sub_districts_raw = ""
+    if region_match:
+        province = region_match.group(1)
+        sub_districts_raw = region_match.group(2)
+
+    # 3. Extract Potential Impacts
+    # Pattern: looks for "berpotensi menimbulkan dampak berupa [Impacts]. Masyarakat"
+    impact_pattern = r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat"
+    impact_match = re.search(impact_pattern, text)
+    impacts = impact_match.group(1).split(" dan ") if impact_match else []
+    # We use split to turn "A, B, dan C" into a clean list
+
+    # 4. Extract Advice
+    # Pattern: looks for "dihimbau untuk [Advice]. Kondisi"
+    advice_pattern = r"dihimbau untuk (.*?)\. Kondisi diperkirakan"
+    advice_match = re.search(advice_pattern, text)
+    advice = advice_match.group(1).split(", ") if advice_match else []
+
+    # 5. Extract End Time
+    # Pattern: looks for "berlangsung hingga [End Time]"
+    end_time_pattern = r"berlangsung hingga (.*?)\."
+    end_time_match = re.search(end_time_pattern, text)
+    end_time = end_time_match.group(1) if end_time_match else "Tidak diketahui"
+
+    return {
+        "start_time": start_time.split(", ")[1],
+        "end_time": end_time.split(", ")[1],
+        "province": province,
+        "sub_districts": sub_districts_raw,
+        "impacts": impacts,
+        "advice": advice,
+    }
+
 def parse_cap_detail(xml_string):
     """
     Parse format CAP (Common Alerting Protocol) dari link detail.
@@ -152,15 +233,27 @@ def parse_cap_detail(xml_string):
     info = root.find("cap:info", ns)
     
     if info is not None:
+        # severity can be: Extreme, Severe, Moderate, Minor, Unknown
+        severity = info.find("cap:severity", ns).text
+        severity_note = "🔴 Bahaya" if severity == "Extreme" else "🔴 Bahaya" if severity == "Severe" else "🟠 Waspada" if severity == "Moderate" else "🟡 Siaga" if severity == "Minor" else "ℹ️ Info"
+        effective_text = info.find("cap:effective", ns).text
         expires_text = info.find("cap:expires", ns).text
-        # Convert ISO format to readable
-        readable_expires = expires_text.split("T")[0] + " " + expires_text.split("T")[1].split("+")[0]
+        # Convert ISO format to readable hour only
+        time_effective = effective_text.split("T")[1].split("+")[0]
+        time_expires = expires_text.split("T")[1].split("+")[0]
+        # simplify the description
+        desc = parse_cap_description(info.find("cap:description", ns).text)
+        logging.info(f"Parsed CAP description: {desc}")
         return {
             "id": root.find("cap:identifier", ns).text,
-            "severity": info.find("cap:severity", ns).text,
-            "headline": info.find("cap:headline", ns).text,
-            "description": info.find("cap:description", ns).text,
-            "expires": readable_expires,
+            "event": info.find("cap:event", ns).text,
+            "severity": severity_note,
+            "effective": time_effective,
+            "expires": time_expires,
+            "province": desc["province"],
+            "sub_districts": desc["sub_districts"],
+            "impacts": desc["impacts"],
+            "advice": desc["advice"],
             "image": info.find("cap:web", ns).text if info.find("cap:web", ns) is not None else None
         }
     return None
