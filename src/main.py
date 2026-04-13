@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import logging
 from aiogram import Bot, Dispatcher
 from handlers import user, admin
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,16 +27,25 @@ async def check_quake_job(bot):
     if current_id != last_id:
         # Simpan ID baru agar tidak berulang
         await update_metadata("last_quake_id", current_id)
+        # "Wilayah":"Pusat gempa berada di darat 24 km Tenggara Larantuka"
+        # remove "Pusat gempa berada di "
+        wilayah = data['Wilayah'].replace("Pusat gempa berada di ", "")
+        # posisi = darat atau laut
+        posisi = wilayah.split(" ")[0]
+        # lokasi_singkat = 24 km Tenggara Larantuka
+        lokasi_singkat = " ".join(wilayah.split(" ")[1:])
         
         # Broadcast ke semua user
         users = await get_all_users()
-        msg = (f"<b>⚠️ INFO GEMPA TERKINI</b>\n\n"
-               f"🗓️ {data['Tanggal']} {data['Jam']}\n"
-               f"📈 Magnitudo: <code>{data['Magnitude']}</code>\n"
-               f"📉 Kedalaman: <code>{data['Kedalaman']}</code>\n"
-               f"📍 Wilayah: <code>{data['Wilayah']}</code>\n"
-               f"📌 Potensi: <code>{data['Potensi']}</code>\n\n"
-               "🚨 <i>Tetap tenang dan hindari bangunan beresiko.</i>")
+        msg = ("<b>🚨 GEMPA TERKINI</b>\n"
+                "━━━━━━━━━━━━━━\n"
+               f"🫨 <b>Magnitudo</b>: <code>{data['Magnitude']}</code>\n"
+               f"📏 <b>Kedalaman</b>: <code>{data['Kedalaman']}</code> ({posisi})\n"
+               f"📍 <b>Lokasi</b>: {lokasi_singkat}\n"
+               f"🏘️ <b>Terasa di</b>: {data['Dirasakan']}\n\n"
+               f"📅 {data['Tanggal']} | {data['Jam']}\n\n"
+               f"⚠️ <i>{data['Potensi']}</i>\n"
+               "━━━━━━━━━━━━━━")
         img_url = f"https://static.bmkg.go.id/{data['Shakemap']}"
         
         for user in users:
@@ -85,7 +95,8 @@ async def nowcast_alert_job(bot):
         
         # 1. Cari link relevan di RSS
         links = parse_nowcast_rss(rss_data, city_name)
-        print(f"Links found for {city_name}: {links}")
+        
+        logging.info(f"Links found for {city_name}: {links}")
         for link in links:
             # 2. Fetch detail jika belum diproses di putaran ini
             if link not in processed_alerts:
@@ -95,17 +106,34 @@ async def nowcast_alert_job(bot):
             
             alert = processed_alerts.get(link)
             if alert:
+                logging.info(f"Alert found for {city_name}: {alert}")
                 # 3. Deduplikasi menggunakan identifier unik CAP
                 is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
                 # Tambahkan timestamp ke image URL untuk cache busting
                 unique_img = f"{alert['image']}?t={session_ts}" if alert['image'] else None
+
+                # Clean up the sub-districts list for the summary (show only first 5)
+                sub_list = alert['sub_districts'].split(", ")
+                short_sub_districts = ", ".join(sub_list[:5]) + "..." if len(sub_list) > 5 else alert['sub_districts']
+    
+                # Convert impacts to bullet points
+                impact_bullets = "\n".join([f"• {i.strip()}" for i in alert['impacts']])
+    
+                # Convert advice to bullet points
+                advice_bullets = "\n".join([f"• {a.strip()}" for a in alert['advice']])
+
                 
                 if is_new:
-                    msg = (f"🚨 <b>PERINGATAN DINI (NOWCASTING)</b>\n\n"
-                           f"📢 <b>{alert['headline']}</b>\n\n"
-                           f"{alert['description']}\n\n"
-                           f"⏰ Berlaku hingga: {alert['expires']}\n\n"
-                           f"<i>Sumber: BMKG</i>")
+                    msg = ("🚨 <b>PERINGATAN DINI CUACA</b>\n"
+                           "━━━━━━━━━━━━━━\n"
+                           f"<b>Status:</b> {alert['severity']}\n"
+                           f"<b>Waktu:</b> {alert['effective']} - {alert['expires']}\n"
+                           f"<b>Cakupan:</b> {alert['province']}\n\n"
+                           f"<b>Potensi Dampak:</b>\n{impact_bullets}\n\n"
+                           f"<b>Saran Keselamatan:</b>\n{advice_bullets}\n\n"
+                           f"<b>Wilayah Terdampak:</b>\n{short_sub_districts}\n\n"
+                           f"<i>Sumber: BMKG</i>\n"
+                           "━━━━━━━━━━━━━━\n")
                     
                     try:
                         if unique_img:
@@ -126,7 +154,7 @@ async def main():
     dp.include_router(admin.router) # Admin dulu agar didahulukan
     dp.include_router(user.router)
 
-    print(f"Bot berjalan dalam mode polling...")
+    logging.info("Bot berjalan dalam mode polling...")
 
     try:
         # Tambah Jobs
