@@ -11,7 +11,7 @@ from utils.constants import REGION_DATA
 
 TZ = os.getenv("TZ", "Asia/Jakarta")
 scheduler = AsyncIOScheduler(timezone=TZ)
-
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Ambil Token dari Environment
 TOKEN = os.getenv("BOT_TOKEN")
@@ -129,6 +129,7 @@ async def nowcast_alert_job(bot):
                            f"<b>Status:</b> {alert['severity']}\n"
                            f"<b>Waktu:</b> {alert['effective']} - {alert['expires']}\n"
                            f"<b>Cakupan:</b> {alert['province']}\n\n"
+                           f"<b>Peringatan:</b>\n{alert['event']}\n\n"
                            f"<b>Potensi Dampak:</b>\n{impact_bullets}\n\n"
                            f"<b>Saran Keselamatan:</b>\n{advice_bullets}\n\n"
                            f"<b>Wilayah Terdampak:</b>\n{short_sub_districts}\n\n"
@@ -158,10 +159,10 @@ async def main():
 
     try:
         # Tambah Jobs
-        scheduler.add_job(check_quake_job, "interval", minutes=1, args=[bot])
+        scheduler.add_job(check_quake_job, "interval", minutes=2, args=[bot])
         scheduler.add_job(daily_weather_job, "cron", hour=6, minute=30, args=[bot, "Pagi"])
         scheduler.add_job(daily_weather_job, "cron", hour=17, minute=0, args=[bot, "Sore"])
-        scheduler.add_job(nowcast_alert_job, "interval", minutes=15, args=[bot])
+        scheduler.add_job(nowcast_alert_job, "interval", minutes=10, args=[bot])
         scheduler.add_job(cleanup_old_metadata, "cron", day_of_week='sun', hour=0)
         
         scheduler.start()

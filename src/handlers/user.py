@@ -2,7 +2,7 @@ from aiogram import Router, types, F
 from aiogram.filters import CommandStart, Command
 from database import add_user, get_bot_mode, is_user_whitelisted, update_user_location, get_user_info
 from utils.keyboards import get_province_keyboard, get_city_keyboard, get_start_keyboard
-from services.bmkg_api import fetch_weather_data, parse_weather_data, fetch_latest_quake
+from services.bmkg_api import fetch_weather_data, parse_weather_data, fetch_latest_quake, fetch_nowcast_alerts, summarize_nowcast_rss
 import os
 
 router = Router()
@@ -93,3 +93,19 @@ async def cmd_earthquake(message: types.Message):
     img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
 
     await message.answer_photo(photo=img_url, caption=msg, parse_mode="HTML")
+
+# command nowcast
+@router.message(Command("nowcast"))
+async def cmd_nowcast(message: types.Message):
+    # Ambil data nowcast terkini dari API
+    raw_data = await fetch_nowcast_alerts()
+    
+    # periksa apakah data ada
+    if not raw_data:
+        return await message.answer("Gagal mengambil data nowcast. Silakan coba lagi nanti.")
+    
+    # parse nowcast
+    nowcast_summary = summarize_nowcast_rss(raw_data)
+    
+    # kirim pesan
+    await message.answer(nowcast_summary, parse_mode="HTML")

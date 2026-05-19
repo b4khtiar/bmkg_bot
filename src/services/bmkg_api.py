@@ -158,7 +158,7 @@ def parse_weather_data(json_response, time_label):
     except (IndexError, KeyError, TypeError) as e:
         return f"⚠️ Gagal memproses data cuaca wilayah ini. ({e})"
 
-def parse_nowcast_rss(xml_string, user_city_name):
+def parse_nowcast_rss(xml_string, user_city_name=None):
     """
     Scan RSS untuk mencari berita yang relevan dengan kota user.
     """
@@ -170,7 +170,10 @@ def parse_nowcast_rss(xml_string, user_city_name):
         description = item.find("description").text
         title = item.find("title").text
         link = item.find("link").text
-        
+        # Jika user_city_name = None, ambil semua link
+        if user_city_name is None:
+            relevant_links.append(link)
+            continue
         # Filter awal: Jika nama Kota/Kabupaten user ada di judul
         if user_city_name.lower() in title.lower() or user_city_name.lower() in description.lower():
             relevant_links.append(link)
@@ -178,45 +181,57 @@ def parse_nowcast_rss(xml_string, user_city_name):
     return relevant_links
 
 def parse_cap_description(text):
-    # 1. Extract Start Time/Date
-    # Pattern: looks for "pada [Date, Time WIB || WITA || WIT]"
-    time_pattern = r"akan terjadi pada ([\d\s\w,]+ (?:WIB|WITA|WIT))"
-    start_time = re.search(time_pattern, text)
-    start_time = start_time.group(1) if start_time else "Tidak diketahui"
+    logging.info(f"Parsing CAP description: {text}")
+    
+    # Bersihkan whitespace aneh (seperti \xa0 atau double space) agar text seragam
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # 1. Extract Start Time
+    # Pola: cari di antara "akan terjadi pada " dan " di sebagian"
+    start_time_match = re.search(r"akan terjadi pada (.*?) di sebagian", text)
+    start_time = start_time_match.group(1).strip() if start_time_match else "Tidak diketahui"
 
     # 2. Extract Region and Sub-districts
-    # Pattern: looks for "wilayah [Province], khususnya di [Sub-districts]. Kondisi"
-    region_pattern = r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi ini"
+    # Pola: tangkap setelah "sebagian wilayah " sampai ", khususnya di ", lalu tangkap kecamatannya sampai tanda titik pertama
+    region_pattern = r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi"
     region_match = re.search(region_pattern, text)
     
     province = ""
     sub_districts_raw = ""
     if region_match:
-        province = region_match.group(1)
-        sub_districts_raw = region_match.group(2)
+        province = region_match.group(1).strip()
+        sub_districts_raw = region_match.group(2).strip()
 
     # 3. Extract Potential Impacts
-    # Pattern: looks for "berpotensi menimbulkan dampak berupa [Impacts]. Masyarakat"
+    # Pola: ambil teks di antara "dampak berupa " dan ". Masyarakat"
     impact_pattern = r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat"
     impact_match = re.search(impact_pattern, text)
-    impacts = impact_match.group(1).split(" dan ") if impact_match else []
-    # We use split to turn "A, B, dan C" into a clean list
+    
+    impacts = []
+    if impact_match:
+        raw_impact = impact_match.group(1)
+        # Pisahkan menggunakan regex agar "A, B, dan C" atau "A dan B" terpisah dengan rapi
+        impacts = [i.strip() for i in re.split(r',| dan ', raw_impact) if i.strip()]
 
     # 4. Extract Advice
-    # Pattern: looks for "dihimbau untuk [Advice]. Kondisi"
+    # Pola: ambil teks di antara "dihimbau untuk " dan ". Kondisi diperkirakan"
     advice_pattern = r"dihimbau untuk (.*?)\. Kondisi diperkirakan"
     advice_match = re.search(advice_pattern, text)
-    advice = advice_match.group(1).split(", ") if advice_match else []
+    
+    advice = []
+    if advice_match:
+        raw_advice = advice_match.group(1)
+        # Pisahkan berdasarkan koma atau kata "serta"
+        advice = [a.strip() for a in re.split(r',| serta ', raw_advice) if a.strip()]
 
     # 5. Extract End Time
-    # Pattern: looks for "berlangsung hingga [End Time]"
-    end_time_pattern = r"berlangsung hingga (.*?)\."
-    end_time_match = re.search(end_time_pattern, text)
-    end_time = end_time_match.group(1) if end_time_match else "Tidak diketahui"
+    # Pola: cari teks setelah "berlangsung hingga " sampai titik terakhir
+    end_time_match = re.search(r"berlangsung hingga (.*?)\.?$", text)
+    end_time = end_time_match.group(1).strip() if end_time_match else "Tidak diketahui"
 
     return {
-        "start_time": start_time.split(", ")[1],
-        "end_time": end_time.split(", ")[1],
+        "start_time": start_time,
+        "end_time": end_time,
         "province": province,
         "sub_districts": sub_districts_raw,
         "impacts": impacts,
@@ -241,9 +256,10 @@ def parse_cap_detail(xml_string):
         # Convert ISO format to readable hour only
         time_effective = effective_text.split("T")[1].split("+")[0]
         time_expires = expires_text.split("T")[1].split("+")[0]
+        description_text = info.find("cap:description", ns).text
         # simplify the description
-        desc = parse_cap_description(info.find("cap:description", ns).text)
-        logging.info(f"Parsed CAP description: {desc}")
+        desc = parse_cap_description(description_text)
+        
         return {
             "id": root.find("cap:identifier", ns).text,
             "event": info.find("cap:event", ns).text,
@@ -257,6 +273,25 @@ def parse_cap_detail(xml_string):
             "image": info.find("cap:web", ns).text if info.find("cap:web", ns) is not None else None
         }
     return None
+
+def summarize_nowcast_rss(nowcast_data):
+    """
+    Summarize nowcast data from RSS feed.
+    """
+    # ambil data Title dan Link saja, dari masing-masing item array nowcast_data
+    root = ET.fromstring(nowcast_data)
+    items = root.findall(".//item")
+    summary = ""
+    for item in items:
+        title = item.find("title").text
+        link = item.find("link").text
+        summary += f"📍 {title}\n"
+        summary += f"🔗 <a href='{link}'>Lihat Detail</a>\n\n"
+    
+    return f"""
+    🌧️ <b>Peringatan Dini Cuaca</b>
+    {summary}
+    """
 
 async def fetch_weather_data(adm_code):
     url = f"https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4={adm_code}"
