@@ -8,10 +8,9 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
-      - TZ=Asia/Jakarta # Set zona waktu container
+      - TZ=Asia/Jakarta
     volumes:
       - ./data:/app/data:z
-      - ./src:/app/src:z
     mem_limit: 192m
     logging:
       driver: "json-file"

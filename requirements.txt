@@ -1,5 +1,6 @@
-aiogram>=3.0.0
-httpx
-aiosqlite
-pytz
-apscheduler
+aiogram==3.28.2
+httpx==0.28.1
+aiosqlite==0.22.1
+pytz==2025.2
+APScheduler==3.11.2
+defusedxml==0.7.1

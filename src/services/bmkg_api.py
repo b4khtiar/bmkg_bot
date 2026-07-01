@@ -2,161 +2,166 @@ import httpx
 import logging
 import random
 import re
+import asyncio
 from datetime import datetime
-import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
+import defusedxml.ElementTree as ET
 from utils.constants import WEATHER_CODES, WEATHER_EMOJI
+from utils.insight_templates import generate_smart_insight, generate_trend_insight
+
+logger = logging.getLogger(__name__)
+
+_http_client = None
+
+async def get_http_client():
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=10.0),
+            follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+    return _http_client
+
+async def close_http_client():
+    global _http_client
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
+_ALLOWED_HOSTS = {"static.bmkg.go.id", "www.bmkg.go.id"}
+
+def validate_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("https",) and parsed.hostname in _ALLOWED_HOSTS
+    except Exception:
+        return False
+
+async def fetch_with_retry(url, retries=2, delay=1.5, text=False, json=False, params=None):
+    if not validate_url(url):
+        logger.warning(f"URL ditolak (bukan domain BMKG): {url}")
+        return None
+    client = await get_http_client()
+    for attempt in range(retries + 1):
+        try:
+            response = await client.get(url, params=params)
+            if response.status_code == 200:
+                return response.text if text else response.json() if json else response
+            logger.warning(f"HTTP {response.status_code} untuk {url} (percobaan {attempt+1}/{retries+1})")
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            logger.warning(f"Gagal fetch {url}: {e} (percobaan {attempt+1}/{retries+1})")
+            if attempt < retries:
+                await asyncio.sleep(delay * (attempt + 1))
+    return None
+
+def _flatten_today_entries(json_response):
+    """Flatten semua entries dari grup cuaca[0] (hari ini)."""
+    cuaca_data = json_response.get('data', [])
+    if not cuaca_data:
+        return []
+    today_groups = cuaca_data[0].get('cuaca', [])
+    all_entries = []
+    for group in today_groups:
+        all_entries.extend(group)
+    return all_entries
+
+def _find_nearest_entry(entries, target_hour):
+    """Cari entry dengan jam terdekat ke target_hour."""
+    best = None
+    best_diff = 999
+    for entry in entries:
+        try:
+            dt = datetime.strptime(entry['local_datetime'], "%Y-%m-%d %H:%M:%S")
+            diff = abs(dt.hour - target_hour)
+            if diff < best_diff:
+                best_diff = diff
+                best = entry
+        except (KeyError, ValueError):
+            continue
+    return best
 
 def parse_weather_daily_brief(json_response):
-    """
-    Parser khusus laporan pagi untuk ringkasan seharian.
-    """
     try:
-        weather_list = json_response.get('data', [])[0].get('cuaca', [])[0]
+        all_entries = _flatten_today_entries(json_response)
+        if not all_entries:
+            return "Gagal memproses briefing cuaca."
+
         lokasi = json_response.get('lokasi', {})
-        
-        # Ambil 4 titik waktu utama (Pagi, Siang, Sore, Malam)
-        # Biasanya index 0, 1, 2, 3 mewakili rentang waktu tersebut di data BMKG
+
+        time_slots = [
+            ("Pagi", 7),
+            ("Siang", 11),
+            ("Sore", 15),
+            ("Petang", 18),
+            ("Malam", 21),
+        ]
+
         summary_points = []
-        labels = ["Pagi", "Siang", "Sore", "Malam"]
-        
-        for i, label in enumerate(labels):
-            if i < len(weather_list):
-                w = weather_list[i]
-                weather_desc = w.get('weather_desc', '')
-                icon = WEATHER_EMOJI.get(str(w['weather']), '❓')
-                temp = f"{w['t']}°C"
+        for label, hour in time_slots:
+            entry = _find_nearest_entry(all_entries, hour)
+            if entry:
+                weather_desc = entry.get('weather_desc', '')
+                icon = WEATHER_EMOJI.get(str(entry['weather']), '❓')
+                temp = f"{entry['t']}°C"
                 summary_points.append(f"🕒 <b>{label}</b>\n{icon} {weather_desc} | {temp}")
 
-        # Gabungkan
         grid_view = "\n\n".join(summary_points)
-        # print(grid_view)
-        tips = generate_smart_insight(weather_list)
+        tips = generate_smart_insight(all_entries)
+
+        cuaca_data = json_response.get('data', [])
+        trend = generate_trend_insight(cuaca_data) if cuaca_data else None
+        trend_section = f"\n\n{trend}" if trend else ""
+
         msg = (
             f"📅 <b>PRAKIRAAN CUACA HARI INI</b>\n"
             f"📍 <b>{lokasi.get('desa')}</b>\n\n"
             f"{grid_view}\n\n"
             f"💡 <b>INSIGHT</b>\n{tips}"
+            f"{trend_section}"
         )
         return msg
-    except:
+    except Exception as e:
+        logger.error(f"Gagal memproses briefing cuaca: {e}")
         return "Gagal memproses briefing cuaca."
 
-def generate_smart_insight(weather_list):
-    if not weather_list:
-        return "Tidak ada data cuaca tersedia."
-
-    temps = []
-    codes = []
-    tps = []
-    rainy_busy_hours = []
-
-    for w in weather_list:
-        try:
-            temp = float(w.get('t', 0))
-            code = int(w.get('weather', 0))
-            tp = float(w.get('tp', 0))
-            temps.append(temp)
-            codes.append(code)
-            tps.append(tp)
-            
-            # Extract hour from "2026-04-10 15:00:00" to check for "busy hours with rain"
-            local_datetime = w.get('local_datetime', '')
-            if local_datetime:
-                hour = int(local_datetime.split(' ')[1].split(':')[0])
-                # We consider 12:00 to 19:00 as busy/afternoon hours with rain (codes 60-67)
-                if 12 <= hour <= 19 and 60 <= code <= 67:
-                    rainy_busy_hours.append(hour)
-        except (IndexError, ValueError, TypeError):
-            pass
-
-    if not temps:
-        return "Tidak ada data cuaca tersedia."
-
-    max_temp = max(temps)
-    
-    # Prefix agar lebih manusiawi
-    prefixes = ["Saran hari ini:", "Insight untuk Anda:", "Info penting:", "Catatan:"]
-    pref = random.choice(prefixes)
-
-    # 1. PRIORITY: Thunderstorms (WMO codes 95, 96, 97)
-    if any(c in [95, 96, 97] for c in codes):
-        return f"⚡ <b>{pref}</b> Ada potensi hujan petir. Pastikan perangkat elektronik terlindungi dan hindari berteduh di bawah pohon."
-
-    # 2. PRIORITY: Rain (Codes in the 60s range)
-    if any(60 <= c <= 67 for c in codes):
-        # Check if rain is predicted during the afternoon/evening (busy hours)
-        is_busy_hour_rain = len(rainy_busy_hours) > 0
-        
-        if is_busy_hour_rain:
-            return f"🌧️ <b>{pref}</b> Siapkan jas hujan! Hujan diprediksi turun pada sore hari saat jam pulang kerja/aktivitas padat."
-        return f"🌦️ <b>{pref}</b> Sedia payung sebelum hujan. Cuaca hari ini diprediksi akan turun hujan."
-
-    # 3. PRIORITY: Extreme Heat
-    if max_temp >= 34:
-        return f"☀️ <b>{pref}</b> Suhu sangat terik (maks {max_temp}°C). Gunakan tabir surya dan pastikan cukup minum air putih."
-
-    # 4. PRIORITY: Sunny / Good for Laundry
-    # Logic: Weather code is clear (0-3) AND precipitation (tp) is 0
-    if all(c <= 3 for c in codes) and all(tp <= 0.01 for tp in tps):
-        return f"🧺 <b>{pref}</b> Hari yang cerah! Sangat ideal untuk menjemur pakaian atau agenda luar ruangan."
-
-    # 5. DEFAULT: Cloudy/Stable
-    return f"☁️ <b>{pref}</b> Cuaca cenderung stabil dan berawan. Tetap nyaman untuk beraktivitas!"
-
-def parse_weather_data(json_response, time_label):
-    """
-    json_response: Full JSON dari API BMKG (adm4)
-    time_label: 'Pagi', 'Siang', 'Sore', 'Malam', atau 'Saat Ini'
-    """
+def parse_weather_current(json_response):
+    """Tampilkan cuaca untuk jam terdekat dengan waktu sekarang."""
     try:
-        # Navigasi ke list cuaca: data -> index 0 -> cuaca -> index 0
-        weather_list = json_response.get('data', [])[0].get('cuaca', [])[0]
+        all_entries = _flatten_today_entries(json_response)
+        if not all_entries:
+            return "Tidak ada data cuaca."
+
+        now = datetime.now()
+        selected = min(all_entries, key=lambda x: abs(
+            datetime.strptime(x['local_datetime'], "%Y-%m-%d %H:%M:%S") - now
+        ))
+
         lokasi = json_response.get('lokasi', {})
         nama_tempat = f"{lokasi.get('desa')}, {lokasi.get('kecamatan')}"
 
-        now = datetime.now()
-        selected = None
-
-        # Strategi Pencarian:
-        if time_label == "Saat Ini":
-            # Cari yang local_datetime-nya paling dekat dengan jam sekarang
-            selected = min(weather_list, key=lambda x: abs(
-                datetime.strptime(x['local_datetime'], "%Y-%m-%d %H:%M:%S") - now
-            ))
-        else:
-            # Cari berdasarkan jam spesifik (Pagi: 07:00, Sore: 17:00)
-            target_hour = 7 if time_label == "Pagi" else 16 # Sore di data ini jam 16
-            for w in weather_list:
-                dt_obj = datetime.strptime(w['local_datetime'], "%Y-%m-%d %H:%M:%S")
-                if dt_obj.hour >= target_hour:
-                    selected = w
-                    break
-        
-        if not selected:
-            selected = weather_list[0]
-
-        # Ambil data spesifik
         temp = selected.get('t')
-        hu = selected.get('hu') # Kelembapan
-        ws = selected.get('ws') # Kecepatan Angin
-        wd = selected.get('wd') # Arah Angin
+        hu = selected.get('hu')
+        ws = selected.get('ws')
+        wd = selected.get('wd')
         desc = selected.get('weather_desc')
         icon_code = str(selected.get('weather'))
-
-        # Gunakan emoji dari constants jika ada, jika tidak pakai weather_desc dari API
         status_emoji = WEATHER_CODES.get(icon_code, desc)
+        local_dt = selected.get('local_datetime', '')
 
-        msg = (f"<b>🌤️ LAPORAN CUACA {time_label.upper()}</b>\n"
-               f"📍 {nama_tempat}\n"
-               f"📅 {selected.get('local_datetime')}\n\n"
-               f"📉 Kondisi: <b>{status_emoji}</b>\n"
-               f"🌡️ Suhu: <code>{temp}°C</code>\n"
-               f"💧 Kelembapan: <code>{hu}%</code>\n"
-               f"💨 Angin: <code>{ws} km/jam</code> (Arah <code>{wd}</code>)\n\n"
-               f"<i> 📡 Sumber: BMKG</i>")
+        msg = (
+            f"<b>🌤️ CUACA SAAT INI</b>\n"
+            f"📍 {nama_tempat}\n"
+            f"📅 {local_dt}\n\n"
+            f"<b>{status_emoji}</b>\n"
+            f"🌡️ <code>{temp}°C</code>  💧 <code>{hu}%</code>\n"
+            f"💨 <code>{ws} km/jam</code> ({wd})\n\n"
+            f"<i>📡 Sumber: BMKG</i>"
+        )
         return msg
-    except (IndexError, KeyError, TypeError) as e:
-        return f"⚠️ Gagal memproses data cuaca wilayah ini. ({e})"
+    except Exception as e:
+        logger.error(f"Gagal memproses cuaca saat ini: {e}")
+        return "Gagal memproses data cuaca."
 
 def parse_nowcast_rss(xml_string, user_city_name=None):
     """
@@ -180,53 +185,38 @@ def parse_nowcast_rss(xml_string, user_city_name=None):
             
     return relevant_links
 
+_RE_START_TIME = re.compile(r"akan terjadi pada (.*?) di sebagian")
+_RE_REGION = re.compile(r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi")
+_RE_IMPACT = re.compile(r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat")
+_RE_ADVICE = re.compile(r"dihimbau untuk (.*?)\. Kondisi diperkirakan")
+_RE_END_TIME = re.compile(r"berlangsung hingga (.*?)\.?$")
+_RE_SPLIT = re.compile(r',| dan | serta ')
+
 def parse_cap_description(text):
     logging.info(f"Parsing CAP description: {text}")
-    
-    # Bersihkan whitespace aneh (seperti \xa0 atau double space) agar text seragam
     text = re.sub(r'\s+', ' ', text).strip()
 
-    # 1. Extract Start Time
-    # Pola: cari di antara "akan terjadi pada " dan " di sebagian"
-    start_time_match = re.search(r"akan terjadi pada (.*?) di sebagian", text)
+    start_time_match = _RE_START_TIME.search(text)
     start_time = start_time_match.group(1).strip() if start_time_match else "Tidak diketahui"
 
-    # 2. Extract Region and Sub-districts
-    # Pola: tangkap setelah "sebagian wilayah " sampai ", khususnya di ", lalu tangkap kecamatannya sampai tanda titik pertama
-    region_pattern = r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi"
-    region_match = re.search(region_pattern, text)
-    
+    region_match = _RE_REGION.search(text)
     province = ""
     sub_districts_raw = ""
     if region_match:
         province = region_match.group(1).strip()
         sub_districts_raw = region_match.group(2).strip()
 
-    # 3. Extract Potential Impacts
-    # Pola: ambil teks di antara "dampak berupa " dan ". Masyarakat"
-    impact_pattern = r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat"
-    impact_match = re.search(impact_pattern, text)
-    
+    impact_match = _RE_IMPACT.search(text)
     impacts = []
     if impact_match:
-        raw_impact = impact_match.group(1)
-        # Pisahkan menggunakan regex agar "A, B, dan C" atau "A dan B" terpisah dengan rapi
-        impacts = [i.strip() for i in re.split(r',| dan ', raw_impact) if i.strip()]
+        impacts = [i.strip() for i in _RE_SPLIT.split(impact_match.group(1)) if i.strip()]
 
-    # 4. Extract Advice
-    # Pola: ambil teks di antara "dihimbau untuk " dan ". Kondisi diperkirakan"
-    advice_pattern = r"dihimbau untuk (.*?)\. Kondisi diperkirakan"
-    advice_match = re.search(advice_pattern, text)
-    
+    advice_match = _RE_ADVICE.search(text)
     advice = []
     if advice_match:
-        raw_advice = advice_match.group(1)
-        # Pisahkan berdasarkan koma atau kata "serta"
-        advice = [a.strip() for a in re.split(r',| serta ', raw_advice) if a.strip()]
+        advice = [a.strip() for a in _RE_SPLIT.split(advice_match.group(1)) if a.strip()]
 
-    # 5. Extract End Time
-    # Pola: cari teks setelah "berlangsung hingga " sampai titik terakhir
-    end_time_match = re.search(r"berlangsung hingga (.*?)\.?$", text)
+    end_time_match = _RE_END_TIME.search(text)
     end_time = end_time_match.group(1).strip() if end_time_match else "Tidak diketahui"
 
     return {
@@ -239,99 +229,189 @@ def parse_cap_description(text):
     }
 
 def parse_cap_detail(xml_string):
-    """
-    Parse format CAP (Common Alerting Protocol) dari link detail.
-    """
-    # Note: CAP XML menggunakan namespace
     ns = {'cap': 'urn:oasis:names:tc:emergency:cap:1.2'}
-    root = ET.fromstring(xml_string)
+    try:
+        root = ET.fromstring(xml_string)
+    except ET.ParseError as e:
+        logger.error(f"Gagal parse XML CAP: {e}")
+        return None
+
     info = root.find("cap:info", ns)
-    
-    if info is not None:
-        # severity can be: Extreme, Severe, Moderate, Minor, Unknown
-        severity = info.find("cap:severity", ns).text
-        severity_note = "🔴 Bahaya" if severity == "Extreme" else "🔴 Bahaya" if severity == "Severe" else "🟠 Waspada" if severity == "Moderate" else "🟡 Siaga" if severity == "Minor" else "ℹ️ Info"
-        effective_text = info.find("cap:effective", ns).text
-        expires_text = info.find("cap:expires", ns).text
-        # Convert ISO format to readable hour only
-        time_effective = effective_text.split("T")[1].split("+")[0]
-        time_expires = expires_text.split("T")[1].split("+")[0]
-        description_text = info.find("cap:description", ns).text
-        # simplify the description
+    if info is None:
+        logger.warning("CAP XML tidak memiliki elemen info")
+        return None
+
+    try:
+        severity_el = info.find("cap:severity", ns)
+        severity = severity_el.text if severity_el is not None else "Unknown"
+        severity_note = (
+            "🔴 Bahaya" if severity in ("Extreme", "Severe") else
+            "🟠 Waspada" if severity == "Moderate" else
+            "🟡 Siaga" if severity == "Minor" else
+            "ℹ️ Info"
+        )
+
+        effective_el = info.find("cap:effective", ns)
+        expires_el = info.find("cap:expires", ns)
+        effective_text = effective_el.text if effective_el is not None else ""
+        expires_text = expires_el.text if expires_el is not None else ""
+        time_effective = effective_text.split("T")[1].split("+")[0] if effective_text else ""
+        time_expires = expires_text.split("T")[1].split("+")[0] if expires_text else ""
+
+        description_el = info.find("cap:description", ns)
+        description_text = description_el.text if description_el is not None else ""
         desc = parse_cap_description(description_text)
-        
+
+        identifier_el = root.find("cap:identifier", ns)
+        event_el = info.find("cap:event", ns)
+        web_el = info.find("cap:web", ns)
+
         return {
-            "id": root.find("cap:identifier", ns).text,
-            "event": info.find("cap:event", ns).text,
+            "id": identifier_el.text if identifier_el is not None else "",
+            "event": event_el.text if event_el is not None else "Peringatan Cuaca",
             "severity": severity_note,
             "effective": time_effective,
             "expires": time_expires,
-            "province": desc["province"],
-            "sub_districts": desc["sub_districts"],
-            "impacts": desc["impacts"],
-            "advice": desc["advice"],
-            "image": info.find("cap:web", ns).text if info.find("cap:web", ns) is not None else None
+            "province": desc.get("province", ""),
+            "sub_districts": desc.get("sub_districts", ""),
+            "impacts": desc.get("impacts", []),
+            "advice": desc.get("advice", []),
+            "image": web_el.text if web_el is not None else None,
         }
+    except AttributeError as e:
+        logger.error(f"Field CAP XML tidak ditemukan: {e}")
+    except Exception as e:
+        logger.error(f"Error tidak terduga di parse_cap_detail: {e}")
     return None
 
-def summarize_nowcast_rss(nowcast_data):
-    """
-    Summarize nowcast data from RSS feed.
-    """
-    # ambil data Title dan Link saja, dari masing-masing item array nowcast_data
-    root = ET.fromstring(nowcast_data)
+def summarize_nowcast_rss(nowcast_data, province_filter=None):
+    try:
+        root = ET.fromstring(nowcast_data)
+    except ET.ParseError as e:
+        logger.error(f"Gagal parse RSS nowcast: {e}")
+        return "Gagal memproses data peringatan cuaca."
+
     items = root.findall(".//item")
-    summary = ""
+    if not items:
+        return "Tidak ada peringatan cuaca saat ini."
+
+    filtered = []
     for item in items:
-        title = item.find("title").text
-        link = item.find("link").text
-        summary += f"📍 {title}\n"
-        summary += f"🔗 <a href='{link}'>Lihat Detail</a>\n\n"
-    
-    return f"""
-    🌧️ <b>Peringatan Dini Cuaca</b>
-    {summary}
-    """
+        title = item.find("title")
+        desc = item.find("description")
+        link = item.find("link")
+        if title is None or link is None:
+            continue
+        title_text = title.text or ""
+        desc_text = desc.text if desc is not None else ""
+        if province_filter and province_filter.lower() not in title_text.lower() and province_filter.lower() not in desc_text.lower():
+            continue
+        filtered.append((title_text, link.text or ""))
+
+    if not filtered:
+        if province_filter:
+            return f"Tidak ada peringatan cuaca untuk wilayah {province_filter} saat ini."
+        return "Tidak ada peringatan cuaca saat ini."
+
+    lines = []
+    for title, link in filtered:
+        lines.append(f"📍 {title}")
+        lines.append(f"🔗 <a href='{link}'>Lihat Detail</a>")
+
+    count_info = f"\n\n📊 <i>Menampilkan {len(filtered)} peringatan</i>" if len(filtered) > 1 else ""
+    return (
+        f"🌧️ <b>Peringatan Dini Cuaca</b>\n"
+        f"{chr(10).join(lines)}"
+        f"{count_info}"
+    )
+
+def parse_weather_multi_day(json_response, days=3):
+    if not json_response:
+        return "Tidak ada data prakiraan cuaca."
+
+    groups = json_response.get('data', [])
+    if not groups:
+        return "Tidak ada data prakiraan cuaca."
+
+    cuaca_groups = groups[0].get('cuaca', [])
+    if not cuaca_groups:
+        return "Tidak ada data prakiraan cuaca."
+
+    lokasi = json_response.get('lokasi', {})
+    nama_tempat = f"{lokasi.get('desa')}, {lokasi.get('kecamatan')}"
+
+    day_names = ["Hari Ini", "Besok", "Lusa"]
+    output = [f"📅 <b>PRAKIRAAN CUACA 3 HARI</b>\n📍 <b>{nama_tempat}</b>\n"]
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    for day_idx in range(min(days, len(cuaca_groups))):
+        entries = cuaca_groups[day_idx]
+        if not entries:
+            continue
+
+        day_label = day_names[day_idx] if day_idx < len(day_names) else f"Hari ke-{day_idx+1}"
+        output.append(f"\n━━━ {day_label} ━━━")
+
+        temp_max = max(float(w.get('t', 0)) for w in entries if w.get('t') is not None)
+        temp_min = min(float(w.get('t', 0)) for w in entries if w.get('t') is not None)
+        has_rain = any(60 <= int(w.get('weather', 0)) <= 82 for w in entries)
+        avg_hu = sum(float(w.get('hu', 50)) for w in entries) / len(entries)
+        max_wind = max(float(w.get('ws', 0)) for w in entries)
+
+        rain_icon = "🌧️" if has_rain else "☀️"
+        output.append(f"🌡️ <code>{temp_min:.0f}°C</code> – <code>{temp_max:.0f}°C</code> {rain_icon}")
+        output.append(f"💧 <code>{avg_hu:.0f}%</code> | 💨 <code>{max_wind:.0f} km/jam</code>")
+
+        time_lines = []
+        for w in entries:
+            local_dt = w.get('local_datetime', '')
+            hour = local_dt.split(' ')[1][:5] if ' ' in local_dt else '—'
+            weather_code = str(w.get('weather', ''))
+            emoji = WEATHER_EMOJI.get(weather_code, '❓')
+            temp = w.get('t', '?')
+            hu = w.get('hu', '?')
+            time_lines.append(f"• {emoji} <code>{hour}</code>  {temp}°C  💧{hu}%")
+
+        if time_lines:
+            output.extend(time_lines)
+
+    output.append("\n━━━━━━━━━━━━━━\n<i>📡 Sumber: BMKG</i>")
+    return "\n".join(output)
 
 async def fetch_weather_data(adm_code):
-    url = f"https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4={adm_code}"
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"Error fetching BMKG Weather: {e}")
+    url = "https://api.bmkg.go.id/publik/prakiraan-cuaca"
+    params = {"adm4": adm_code}
+    try:
+        data = await fetch_with_retry(url, json=True, params=params)
+        return data
+    except Exception as e:
+        logger.error(f"Gagal fetch cuaca untuk {adm_code}: {e}")
     return None
 
 async def fetch_nowcast_alerts():
     url = "https://www.bmkg.go.id/alerts/nowcast/id"
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, timeout=15)
-            if response.status_code == 200:
-                return response.text
-        except Exception as e:
-            print(f"Error RSS: {e}")
+    try:
+        data = await fetch_with_retry(url, text=True)
+        return data
+    except Exception as e:
+        logger.error(f"Gagal fetch nowcast RSS: {e}")
     return None
 
 async def fetch_alert_detail(detail_url: str):
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(detail_url, timeout=10)
-            if response.status_code == 200:
-                return response.text
-        except Exception:
-            return None
+    try:
+        data = await fetch_with_retry(detail_url, text=True, retries=1)
+        return data
+    except Exception as e:
+        logger.warning(f"Gagal fetch detail alert: {e}")
+    return None
 
 async def fetch_latest_quake():
-    """Mengambil data gempa terbaru"""
     url = "https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json"
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url)
-            if response.status_code == 200:
-                return response.json()['Infogempa']['gempa']
-        except Exception as e:
-            logging.error(f"Error fetching Quake Data: {e}")
+    try:
+        data = await fetch_with_retry(url, json=True, retries=2)
+        if data:
+            return data.get('Infogempa', {}).get('gempa')
+    except Exception as e:
+        logger.error(f"Gagal fetch data gempa: {e}")
     return None
