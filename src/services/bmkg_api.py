@@ -29,13 +29,18 @@ async def close_http_client():
         await _http_client.aclose()
         _http_client = None
 
-_ALLOWED_HOSTS = {"static.bmkg.go.id", "www.bmkg.go.id"}
+_ALLOWED_HOSTS = {"api.bmkg.go.id", "data.bmkg.go.id", "static.bmkg.go.id", "www.bmkg.go.id"}
 
 def validate_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
-        return parsed.scheme in ("https",) and parsed.hostname in _ALLOWED_HOSTS
-    except Exception:
+        hostname = parsed.hostname
+        result = parsed.scheme in ("https",) and hostname in _ALLOWED_HOSTS
+        if not result:
+            logger.warning(f"URL ditolak: scheme={parsed.scheme} hostname={hostname} path={parsed.path}")
+        return result
+    except Exception as e:
+        logger.warning(f"Gagal parse URL {url}: {e}")
         return False
 
 async def fetch_with_retry(url, retries=2, delay=1.5, text=False, json=False, params=None):
