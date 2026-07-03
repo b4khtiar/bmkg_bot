@@ -96,7 +96,7 @@ def parse_weather_daily_brief(json_response):
 
         time_slots = [
             ("Pagi", 7),
-            ("Siang", 11),
+            ("Siang", 12),
             ("Sore", 15),
             ("Petang", 18),
             ("Malam", 21),
@@ -112,7 +112,7 @@ def parse_weather_daily_brief(json_response):
                 summary_points.append(f"🕒 <b>{label}</b>\n{icon} {weather_desc} | {temp}")
 
         grid_view = "\n\n".join(summary_points)
-        tips = generate_smart_insight(all_entries)
+        tips = generate_smart_insight(all_entries, max_insights=1)
 
         cuaca_data = json_response.get('data', [])
         trend = generate_trend_insight(cuaca_data) if cuaca_data else None

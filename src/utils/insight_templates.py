@@ -221,22 +221,29 @@ def pick_templates_until(pool, meta, max_total_chars=600):
     return chosen
 
 
-def generate_smart_insight(weather_list):
+def generate_smart_insight(weather_list, max_insights=None):
     meta = analyze_weather(weather_list)
     if not meta:
         return "Tidak ada data cuaca tersedia."
 
     pref = random.choice(PREFIXES)
     lines = []
+    is_short = max_insights == 1
 
     if meta['has_thunderstorm']:
         pool = THUNDERSTORM_TEMPLATES
         emoji = "⚡"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     elif meta['rain_heavy']:
         pool = RAIN_HEAVY_TEMPLATES
         emoji = "⛈️"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     elif meta['has_rain']:
         rush = any(15 <= h <= 18 for h in meta['rain_hours'])
         if rush:
@@ -248,44 +255,60 @@ def generate_smart_insight(weather_list):
         else:
             pool = RAIN_LIGHT_TEMPLATES
         emoji = "🌧️"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     elif meta['max_temp'] >= 34:
         pool = HEAT_TEMPLATES
         emoji = "☀️"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     elif meta['is_clear']:
         pool = CLEAR_TEMPLATES
         emoji = "☀️"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     elif meta['is_cloudy']:
         pool = CLOUDY_TEMPLATES
         emoji = "☁️"
-        lines.extend(pick_templates_until(pool, meta))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
+        else:
+            lines.extend(pick_templates_until(pool, meta))
     else:
         pool = DEFAULT_TEMPLATES
         emoji = "ℹ️"
-        lines.extend(pick_templates_until(pool, meta))
-
-    has_haze = any(c in WEATHER_CODE_GROUPS['haze'] for c in meta['codes'])
-    if has_haze:
-        if meta['has_rain'] or meta['has_thunderstorm']:
-            lines.extend(pick_templates_until(HAZE_TEMPLATES, meta, max_total_chars=300))
+        if is_short:
+            lines.append(random.choice(pool).format(**meta))
         else:
-            lines.append(random.choice(HAZE_TEMPLATES))
+            lines.extend(pick_templates_until(pool, meta))
 
-    if meta['max_wind'] > 25 and not any('angin' in l.lower() for l in lines):
-        lines.append(random.choice(WIND_TEMPLATES).format(**meta))
-
-    if meta['avg_hu'] > 85:
-        if not any('lembap' in l.lower() or 'kelembapan' in l.lower() for l in lines):
+    if not is_short:
+        has_haze = any(c in WEATHER_CODE_GROUPS['haze'] for c in meta['codes'])
+        if has_haze:
             if meta['has_rain'] or meta['has_thunderstorm']:
-                lines.append(random.choice(HUMIDITY_HIGH_TEMPLATES).format(**meta))
-    elif meta['avg_hu'] < 40:
-        if not any('kering' in l.lower() or 'kelembapan' in l.lower() for l in lines):
-            lines.append(random.choice(HUMIDITY_LOW_TEMPLATES).format(**meta))
+                lines.extend(pick_templates_until(HAZE_TEMPLATES, meta, max_total_chars=300))
+            else:
+                lines.append(random.choice(HAZE_TEMPLATES))
 
-    if len(lines) > 2:
-        lines = lines[:2]
+        if meta['max_wind'] > 25 and not any('angin' in l.lower() for l in lines):
+            lines.append(random.choice(WIND_TEMPLATES).format(**meta))
+
+        if meta['avg_hu'] > 85:
+            if not any('lembap' in l.lower() or 'kelembapan' in l.lower() for l in lines):
+                if meta['has_rain'] or meta['has_thunderstorm']:
+                    lines.append(random.choice(HUMIDITY_HIGH_TEMPLATES).format(**meta))
+        elif meta['avg_hu'] < 40:
+            if not any('kering' in l.lower() or 'kelembapan' in l.lower() for l in lines):
+                lines.append(random.choice(HUMIDITY_LOW_TEMPLATES).format(**meta))
+
+        if len(lines) > 2:
+            lines = lines[:2]
 
     separator = "\n"
     return f"{emoji} <b>{pref}</b> {separator.join(lines)}"
