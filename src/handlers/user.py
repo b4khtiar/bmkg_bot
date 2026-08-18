@@ -133,7 +133,7 @@ async def cmd_earthquake(message: types.Message):
         f"📌 Potensi: <code>{raw_data['Potensi']}</code>"
         f"{jarak_info}"
     )
-    img_url = f"https://static.bmkg.go.id/{raw_data['Shakemap']}"
+    img_url = f"https://cdn.bmkg.go.id/{raw_data['Shakemap']}"
 
     try:
         await message.answer_photo(photo=img_url, caption=msg, parse_mode="HTML")

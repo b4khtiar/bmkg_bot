@@ -29,7 +29,7 @@ async def close_http_client():
         await _http_client.aclose()
         _http_client = None
 
-_ALLOWED_HOSTS = {"api.bmkg.go.id", "data.bmkg.go.id", "static.bmkg.go.id", "www.bmkg.go.id"}
+_ALLOWED_HOSTS = {"api.bmkg.go.id", "cdn.bmkg.go.id", "data.bmkg.go.id", "static.bmkg.go.id", "www.bmkg.go.id"}
 
 def validate_url(url: str) -> bool:
     try:

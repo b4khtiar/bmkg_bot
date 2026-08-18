@@ -77,7 +77,7 @@ async def check_quake_job(bot):
             f"⚠️ <i>{data['Potensi']}</i>\n"
             "━━━━━━━━━━━━━━"
         )
-        img_url = f"https://static.bmkg.go.id/{data['Shakemap']}"
+        img_url = f"https://cdn.bmkg.go.id/{data['Shakemap']}"
 
         results = await asyncio.gather(*[
             _send_photo_sem(bot, u['chat_id'], img_url, msg) for u in users
