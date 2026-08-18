@@ -35,14 +35,17 @@ podman-compose build && podman-compose up -d
 
 | File | Responsibility |
 |------|---------------|
-| `src/main.py` | Bot setup, scheduler, broadcast jobs, graceful shutdown |
-| `src/database.py` | All SQLite access via `aiosqlite`, singleton connection |
-| `src/services/bmkg_api.py` | HTTP fetch (httpx, retry, URL allowlist), BMKG JSON/XML parsing |
+| `src/main.py` | Bot setup, scheduler, broadcast jobs, graceful shutdown, health server startup |
+| `src/database.py` | All SQLite access via `aiosqlite`, singleton connection, `weather_cache` & `pending_sends` tables |
+| `src/services/bmkg_api.py` | HTTP fetch (httpx, retry, URL allowlist, circuit breaker), BMKG JSON/XML parsing, cache fallback |
 | `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/gempa`, `/nowcast`, `/atur_notif`, `/ping` |
-| `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` |
+| `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` (validated) |
 | `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `WEATHER_CODES`, `WEATHER_EMOJI`, `_VALID_BOT_MODES` |
-| `src/utils/keyboards.py` | Inline keyboard builders |
+| `src/utils/keyboards.py` | Inline keyboard builders (with 64-byte callback_data assertions) |
 | `src/utils/insight_templates.py` | Smart weather insight text generation |
+| `src/logging_config.py` | Structured JSON logging with bot_mode context |
+| `src/alerts.py` | Admin alert throttling, BMKG failure tracking, broadcast failure rate monitoring |
+| `src/health_server.py` | Threaded stdlib HTTP `/healthz` + `/metrics` endpoints on port 8080 |
 | `data/db_schema.md` | DB schema reference |
 
 ## Running from source
@@ -76,3 +79,22 @@ python src/main.py
 - The bot uses **long polling** (`dp.start_polling`) — no webhook endpoint. For production scaling, refactor to webhook mode in `main.py`.
 - `check_and_update_alert()` is used for CAP alert dedup (not just "check") — it writes `cap_<id>` to config table and returns True only if the value changed.
 - Weather parsing (`parse_weather_current`, `parse_weather_daily_brief`, `parse_weather_multi_day`) assumes BMKG JSON structure: `data[0].cuaca` is a list of time-group lists. If BMKG changes their API shape, these break.
+
+## Operational notes
+
+- **Health check**: `GET http://localhost:8080/healthz` — returns JSON `{"status":"ok/degraded","db":bool,"bmkg_reachable":bool}`. Runs as a threaded stdlib HTTP server alongside the async bot. Port configurable via `HEALTH_SERVER_PORT` env var.
+- **Metrics**: `GET http://localhost:8080/metrics` — basic Prometheus-format metrics (uptime, DB/BMKG health).
+- **Circuit breakers**: `CircuitBreaker` in `bmkg_api.py` — 3 consecutive failures → 10 min open state per endpoint. Weather uses per-`adm_code` breakers; quake and nowcast use shared breakers.
+- **Alert cooldown**: Admin alerts are throttled to 1 every 5 minutes (same first 80 chars) to avoid spamming.
+- **BMKG failure tracking**: `alerts.py:record_bmkg_failure()` / `record_bmkg_success()` track consecutive failures per endpoint. Admin alert fires when threshold `BMKG_FAILURES_ALERT_THRESHOLD` (default 3) is reached.
+- **Broadcast failure monitoring**: `alerts.py:check_broadcast_failure_rate()` returns True if failure rate exceeds `BROADCAST_FAILURE_RATE` (default 0.2). Triggers immediate alert instead of just a summary log.
+- **Failed message retries**: Messages that fail to send are queued in `pending_sends` table. Retried every 5 minutes via `retry_failed_sends_job`. Dropped after `MAX_SEND_RETRIES` (3) failed attempts.
+- **Weather cache**: 15-min TTL SQLite cache for weather data. Served with banner "⚠️ Data cadangan..." when BMKG API is unreachable. Circuit breaker prevents further requests until cooldown expires.
+- **Logging**: Structured JSON logs to stdout. Uses `logging_config.py` with `StructuredFormatter` that includes `bot_mode` context on every record.
+- **Env vars**: `BOT_TOKEN` and `ADMIN_CHAT_ID` are strictly required at startup — bot crashes with `RuntimeError` if missing.
+
+## Phase 4 roadmap (tracked — not yet implemented)
+
+- **Webhook migration** — Long polling doesn't scale. Switch to `dp.start_webhook()` with HTTPS for >50 users.
+- **Full REGION_DATA** — Currently only DI Yogyakarta locations are available in the location picker. Enumerate all 34 provinces (see `PROVINCE_MAP` in `constants.py`).
+- **Full Prometheus metrics** — Add custom Gauges/Counter for broadcast success/failure rates, BMKG latency, circuit breaker state.

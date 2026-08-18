@@ -16,9 +16,12 @@ def get_city_keyboard(province_name: str):
     cities = REGION_DATA.get(province_name, {})
 
     for code, name in cities.items():
+        callback_data = f"setloc_{code}_{name}"
+        assert len(callback_data.encode("utf-8")) <= 64, \
+            f"callback_data too long for {name}: {len(callback_data)} bytes"
         builder.button(
             text=name,
-            callback_data=f"setloc_{code}_{name}"
+            callback_data=callback_data
         )
     builder.adjust(2)
 

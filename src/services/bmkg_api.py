@@ -3,6 +3,7 @@ import logging
 import random
 import re
 import asyncio
+import time
 from datetime import datetime
 from urllib.parse import urlparse
 import defusedxml.ElementTree as ET
@@ -42,6 +43,44 @@ def validate_url(url: str) -> bool:
     except Exception as e:
         logger.warning(f"Gagal parse URL {url}: {e}")
         return False
+
+
+class CircuitBreaker:
+    """In-memory circuit breaker — single-process, per-endpoint."""
+
+    def __init__(self, name: str, failure_threshold: int = 3, cooldown: int = 600):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.cooldown = cooldown
+        self._fail_count = 0
+        self._last_failure = 0
+        self._open = False
+
+    def can_execute(self) -> bool:
+        if not self._open:
+            return True
+        if time.time() - self._last_failure >= self.cooldown:
+            self._open = False  # Half-open
+            return True
+        return False
+
+    def record_failure(self):
+        self._fail_count += 1
+        self._last_failure = time.time()
+        if self._fail_count >= self.failure_threshold:
+            self._open = True
+            logger.warning(f"Circuit breaker OPEN for {self.name}")
+
+    def record_success(self):
+        self._fail_count = 0
+        self._open = False
+
+
+# Circuit breakers per endpoint type
+_quake_circuit = CircuitBreaker("quake")
+_nowcast_circuit = CircuitBreaker("nowcast")
+_weather_circuits = {}  # adm_code -> CircuitBreaker
+
 
 async def fetch_with_retry(url, retries=2, delay=1.5, text=False, json=False, params=None):
     if not validate_url(url):
@@ -86,11 +125,33 @@ def _find_nearest_entry(entries, target_hour):
             continue
     return best
 
+def _format_cache_banner(cached_at: str) -> str:
+    """Format a banner for cached weather data."""
+    try:
+        cached_dt = datetime.fromisoformat(cached_at)
+        age_min = int((datetime.now() - cached_dt).total_seconds() / 60)
+        return f"⚠️ <i>Data cadangan dari {age_min} menit lalu (BMKG sinyal lemah).</i>\n\n"
+    except Exception:
+        return "⚠️ <i>Data cadangan (BMKG sinyal lemah).</i>\n\n"
+
+
+def _extract_cache_metadata(json_response):
+    """Pop cache metadata from response dict. Returns (is_cached, cached_at_str)."""
+    if not isinstance(json_response, dict):
+        return False, None
+    is_cached = json_response.pop("_cached", False)
+    cached_at = json_response.pop("_cached_at", None)
+    return is_cached, cached_at
+
+
 def parse_weather_daily_brief(json_response):
+    is_cached, cached_at = _extract_cache_metadata(json_response)
+    cache_banner = _format_cache_banner(cached_at) if (is_cached and cached_at) else ""
+
     try:
         all_entries = _flatten_today_entries(json_response)
         if not all_entries:
-            return "Gagal memproses briefing cuaca."
+            return f"{cache_banner}Gagal memproses briefing cuaca."
 
         lokasi = json_response.get('lokasi', {})
 
@@ -125,17 +186,20 @@ def parse_weather_daily_brief(json_response):
             f"💡 <b>INSIGHT</b>\n{tips}"
             f"{trend_section}"
         )
-        return msg
+        return f"{cache_banner}{msg}" if cache_banner else msg
     except Exception as e:
         logger.error(f"Gagal memproses briefing cuaca: {e}")
-        return "Gagal memproses briefing cuaca."
+        return f"{cache_banner}Gagal memproses briefing cuaca."
 
 def parse_weather_current(json_response):
     """Tampilkan cuaca untuk jam terdekat dengan waktu sekarang."""
+    is_cached, cached_at = _extract_cache_metadata(json_response)
+    cache_banner = _format_cache_banner(cached_at) if (is_cached and cached_at) else ""
+
     try:
         all_entries = _flatten_today_entries(json_response)
         if not all_entries:
-            return "Tidak ada data cuaca."
+            return f"{cache_banner}Tidak ada data cuaca."
 
         now = datetime.now()
         selected = min(all_entries, key=lambda x: abs(
@@ -163,10 +227,10 @@ def parse_weather_current(json_response):
             f"💨 <code>{ws} km/jam</code> ({wd})\n\n"
             f"<i>📡 Sumber: BMKG</i>"
         )
-        return msg
+        return f"{cache_banner}{msg}" if cache_banner else msg
     except Exception as e:
         logger.error(f"Gagal memproses cuaca saat ini: {e}")
-        return "Gagal memproses data cuaca."
+        return f"{cache_banner}Gagal memproses data cuaca."
 
 def parse_nowcast_rss(xml_string, user_city_name=None):
     """
@@ -385,23 +449,81 @@ def parse_weather_multi_day(json_response, days=3):
     return "\n".join(output)
 
 async def fetch_weather_data(adm_code):
+    """Fetch weather data. Uses circuit breaker. Returns cached data with metadata on failure."""
     url = "https://api.bmkg.go.id/publik/prakiraan-cuaca"
     params = {"adm4": adm_code}
+
+    if adm_code not in _weather_circuits:
+        _weather_circuits[adm_code] = CircuitBreaker(f"weather_{adm_code}")
+    circuit = _weather_circuits[adm_code]
+
+    if not circuit.can_execute():
+        logger.warning(f"Circuit OPEN for weather {adm_code}, trying cache")
+        cached = await _get_cached_weather(adm_code)
+        if cached:
+            data, cached_at = cached
+            data["_cached"] = True
+            data["_cached_at"] = cached_at
+            return data
+        return None
+
     try:
         data = await fetch_with_retry(url, json=True, params=params)
-        return data
+        if data:
+            circuit.record_success()
+            await _cache_weather(adm_code, data)
+            return data
+        else:
+            circuit.record_failure()
+            cached = await _get_cached_weather(adm_code)
+            if cached:
+                data, cached_at = cached
+                data["_cached"] = True
+                data["_cached_at"] = cached_at
+                logger.warning(f"Using weather cache for {adm_code}")
+                return data
+            return None
     except Exception as e:
+        circuit.record_failure()
         logger.error(f"Gagal fetch cuaca untuk {adm_code}: {e}")
-    return None
+        cached = await _get_cached_weather(adm_code)
+        if cached:
+            data, cached_at = cached
+            data["_cached"] = True
+            data["_cached_at"] = cached_at
+            return data
+        return None
+
+
+async def _cache_weather(adm_code, weather_json):
+    """Internal: import here to avoid circular dependency."""
+    from database import cache_weather
+    await cache_weather(adm_code, weather_json)
+
+
+async def _get_cached_weather(adm_code):
+    """Internal: import here to avoid circular dependency."""
+    from database import get_cached_weather
+    return await get_cached_weather(adm_code)
+
 
 async def fetch_nowcast_alerts():
+    if not _nowcast_circuit.can_execute():
+        return None
     url = "https://www.bmkg.go.id/alerts/nowcast/id"
     try:
         data = await fetch_with_retry(url, text=True)
-        return data
+        if data:
+            _nowcast_circuit.record_success()
+            return data
+        else:
+            _nowcast_circuit.record_failure()
+            return None
     except Exception as e:
+        _nowcast_circuit.record_failure()
         logger.error(f"Gagal fetch nowcast RSS: {e}")
-    return None
+        return None
+
 
 async def fetch_alert_detail(detail_url: str):
     try:
@@ -409,14 +531,22 @@ async def fetch_alert_detail(detail_url: str):
         return data
     except Exception as e:
         logger.warning(f"Gagal fetch detail alert: {e}")
-    return None
+        return None
+
 
 async def fetch_latest_quake():
+    if not _quake_circuit.can_execute():
+        return None
     url = "https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json"
     try:
         data = await fetch_with_retry(url, json=True, retries=2)
         if data:
+            _quake_circuit.record_success()
             return data.get('Infogempa', {}).get('gempa')
+        else:
+            _quake_circuit.record_failure()
+            return None
     except Exception as e:
+        _quake_circuit.record_failure()
         logger.error(f"Gagal fetch data gempa: {e}")
-    return None
+        return None

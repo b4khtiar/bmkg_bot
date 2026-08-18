@@ -3,34 +3,51 @@ import os
 import time
 import signal
 import logging
+import httpx
 from aiogram import Bot, Dispatcher
 from handlers import user, admin
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services.bmkg_api import (
     fetch_latest_quake, fetch_weather_data, fetch_nowcast_alerts,
     parse_nowcast_rss, fetch_alert_detail, parse_cap_detail,
-    parse_weather_daily_brief, parse_weather_current, close_http_client
+    parse_weather_daily_brief, parse_weather_current, close_http_client,
 )
 from database import (
     init_db, get_metadata, update_metadata, check_and_update_alert,
-    cleanup_old_alerts, get_users_with_pref, get_user_info, close_db
+    cleanup_old_alerts, get_users_with_pref, get_user_info, close_db, get_db,
+    enqueue_failed_send, retry_pending_sends, delete_pending_send,
+    increment_retry_count,
 )
 from utils.constants import get_province_name
+from logging_config import setup_logging
+from alerts import (
+    send_admin_alert, record_bmkg_failure, record_bmkg_success,
+    check_broadcast_failure_rate
+)
+from health_server import start_health_server, stop_health_server, _set_checkers
 
 TZ = os.getenv("TZ", "Asia/Jakarta")
-scheduler = AsyncIOScheduler(timezone=TZ)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
+
+# Validate required env vars at startup
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is required. Set it in .env")
+if ADMIN_ID == 0:
+    raise RuntimeError("ADMIN_CHAT_ID is required and must be a valid Telegram chat ID")
+
+setup_logging(level="INFO", bot_mode="OPEN")
 logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
+scheduler = AsyncIOScheduler(timezone=TZ)
 _shutdown_event = asyncio.Event()
 _shutdown_called = False
 
 _SEND_SEM = asyncio.Semaphore(10)
+
+# Max retries for pending sends before giving up
+MAX_SEND_RETRIES = 3
+
 
 async def _send_photo_sem(bot, chat_id, photo, caption):
     async with _SEND_SEM:
@@ -38,8 +55,10 @@ async def _send_photo_sem(bot, chat_id, photo, caption):
             await bot.send_photo(chat_id, photo=photo, caption=caption, parse_mode="HTML")
             return True
         except Exception as e:
-            logger.warning(f"Gagal kirim foto ke {chat_id}: {e}")
+            logger.warning(f"Gagal kirim foto ke {chat_id}: {e}", extra={"chat_id": chat_id})
+            await enqueue_failed_send(chat_id, caption, photo_url=photo)
             return False
+
 
 async def _send_msg_sem(bot, chat_id, msg):
     async with _SEND_SEM:
@@ -47,13 +66,87 @@ async def _send_msg_sem(bot, chat_id, msg):
             await bot.send_message(chat_id, msg, parse_mode="HTML")
             return True
         except Exception as e:
-            logger.warning(f"Gagal kirim pesan ke {chat_id}: {e}")
+            logger.warning(f"Gagal kirim pesan ke {chat_id}: {e}", extra={"chat_id": chat_id})
+            await enqueue_failed_send(chat_id, msg)
             return False
+
+
+async def retry_failed_sends_job(bot):
+    """Retry queued failed sends. Deletes after max retries."""
+    rows = await retry_pending_sends()
+    if not rows:
+        return
+
+    sent = 0
+    failed_permanently = 0
+    tasks = []
+
+    for row in rows:
+        send_id = row["id"]
+        chat_id = row["chat_id"]
+        message = row["message"]
+        photo_url = row["photo_url"]
+
+        if photo_url:
+            tasks.append(_retry_send(bot, send_id, chat_id, photo_url, message))
+        else:
+            tasks.append(_retry_send_text(bot, send_id, chat_id, message))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, result in enumerate(results):
+        row = rows[i]
+        send_id = row["id"]
+        if isinstance(result, Exception):
+            logger.warning(f"Retry exception for send #{send_id}: {result}")
+        elif result is False:
+            if row["retry_count"] >= MAX_SEND_RETRIES:
+                await delete_pending_send(send_id)
+                failed_permanently += 1
+            else:
+                await increment_retry_count(send_id)
+
+    logger.info(f"Retry job: {sent} sent, {failed_permanently} dropped after max retries")
+
+
+async def _retry_send(bot, send_id, chat_id, photo_url, caption):
+    """Attempt to resend a photo message. Returns True if sent."""
+    try:
+        async with _SEND_SEM:
+            await bot.send_photo(chat_id, photo=photo_url, caption=caption, parse_mode="HTML")
+        await delete_pending_send(send_id)
+        return True
+    except Exception as e:
+        logger.warning(f"Retry failed for photo to {chat_id}: {e}", extra={"chat_id": chat_id})
+        return False
+
+
+async def _retry_send_text(bot, send_id, chat_id, message):
+    """Attempt to resend a text message. Returns True if sent."""
+    try:
+        async with _SEND_SEM:
+            await bot.send_message(chat_id, message, parse_mode="HTML")
+        await delete_pending_send(send_id)
+        return True
+    except Exception as e:
+        logger.warning(f"Retry failed for message to {chat_id}: {e}", extra={"chat_id": chat_id})
+        return False
+
 
 async def check_quake_job(bot):
     data = await fetch_latest_quake()
     if not data:
+        failed = record_bmkg_failure("quake")
+        if failed:
+            await send_admin_alert(
+                bot,
+                f"BMKG gempa API gagal fetch berulang (3x). Bot tidak dapat memantau gempa. "
+                f"Circuit breaker terbuka untuk endpoint ini.",
+                severity="CRITICAL"
+            )
         return
+
+    record_bmkg_success("quake")
 
     last_id = await get_metadata("last_quake_id")
     current_id = data['DateTime']
@@ -87,7 +180,14 @@ async def check_quake_job(bot):
 
         logger.info(f"Broadcast gempa selesai: {success} berhasil, {failed} gagal")
         if failed > 0 and ADMIN_ID:
-            try:
+            if check_broadcast_failure_rate(success, len(results)):
+                await send_admin_alert(
+                    bot,
+                    f"⚠️ Broadcast gempa failure rate tinggi: {failed}/{len(results)} gagal. "
+                    f"Bot mungkin diblokir oleh Telegram atau ada masalah koneksi.",
+                    severity="WARNING"
+                )
+            else:
                 await bot.send_message(
                     ADMIN_ID,
                     f"⚠️ <b>Ringkasan Broadcast Gempa</b>\n"
@@ -95,17 +195,21 @@ async def check_quake_job(bot):
                     f"❌ Gagal: {failed}",
                     parse_mode="HTML"
                 )
-            except Exception:
-                pass
+
 
 async def daily_weather_job(bot, time_label):
     users = await get_users_with_pref("notify_weather")
     weather_cache = {}
+    cache_banners = {}
 
+    # Fetch weather per unique adm_code, with per-user graceful degradation
     for user_row in users:
         adm_code = user_row['adm_code']
-        if not adm_code or adm_code in weather_cache:
+        if not adm_code:
             continue
+        if adm_code in weather_cache:
+            continue
+
         raw_data = await fetch_weather_data(adm_code)
         if raw_data:
             if time_label == "Pagi":
@@ -115,7 +219,8 @@ async def daily_weather_job(bot, time_label):
 
     tasks = []
     for user_row in users:
-        msg = weather_cache.get(user_row['adm_code'])
+        adm_code = user_row['adm_code']
+        msg = weather_cache.get(adm_code)
         if msg:
             tasks.append(_send_msg_sem(bot, user_row['chat_id'], msg))
 
@@ -125,7 +230,13 @@ async def daily_weather_job(bot, time_label):
 
     logger.info(f"Broadcast cuaca ({time_label}) selesai: {success} berhasil, {failed} gagal")
     if failed > 0 and ADMIN_ID:
-        try:
+        if check_broadcast_failure_rate(success, len(results)):
+            await send_admin_alert(
+                bot,
+                f"⚠️ Broadcast cuaca ({time_label}) failure rate tinggi: {failed}/{len(results)} gagal.",
+                severity="WARNING"
+            )
+        else:
             await bot.send_message(
                 ADMIN_ID,
                 f"🌤️ <b>Ringkasan Broadcast Cuaca ({time_label})</b>\n"
@@ -133,13 +244,22 @@ async def daily_weather_job(bot, time_label):
                 f"❌ Gagal: {failed}",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+
 
 async def nowcast_alert_job(bot):
     rss_data = await fetch_nowcast_alerts()
     if not rss_data:
+        failed = record_bmkg_failure("nowcast")
+        if failed:
+            await send_admin_alert(
+                bot,
+                f"BMKG nowcast RSS fetch gagal berulang (3x). "
+                f"Peringatan dini cuaca tidak dapat diperbarui.",
+                severity="WARNING"
+            )
         return
+
+    record_bmkg_success("nowcast")
 
     users = await get_users_with_pref("notify_nowcast")
     session_ts = int(time.time())
@@ -208,7 +328,13 @@ async def nowcast_alert_job(bot):
 
     logger.info(f"Broadcast nowcast selesai: {success} berhasil, {failed} gagal")
     if failed > 0 and ADMIN_ID:
-        try:
+        if check_broadcast_failure_rate(success, len(results)):
+            await send_admin_alert(
+                bot,
+                f"⚠️ Broadcast nowcast failure rate tinggi: {failed}/{len(results)} gagal.",
+                severity="WARNING"
+            )
+        else:
             await bot.send_message(
                 ADMIN_ID,
                 f"🚨 <b>Ringkasan Broadcast Nowcast</b>\n"
@@ -216,8 +342,30 @@ async def nowcast_alert_job(bot):
                 f"❌ Gagal: {failed}",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+
+
+async def _db_health_check():
+    """Async DB health check — used by health server thread via asyncio.run()."""
+    try:
+        db = await get_db()
+        cursor = await db.execute("SELECT 1 FROM config LIMIT 1")
+        await cursor.fetchone()
+        await cursor.close()
+        return True
+    except Exception as e:
+        logger.warning(f"DB healthcheck failed: {e}")
+        return False
+
+
+def _bmkg_health_check():
+    """Sync BMKG health check — lightweight HEAD request."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.head("https://api.bmkg.go.id", follow_redirects=True)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
 
 async def shutdown():
     global _shutdown_called
@@ -228,6 +376,8 @@ async def shutdown():
     logger.info("Memulai shutdown...")
     _shutdown_event.set()
 
+    stop_health_server()
+
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("Scheduler dihentikan.")
@@ -236,10 +386,14 @@ async def shutdown():
     await close_http_client()
     logger.info("Koneksi database dan HTTP ditutup.")
 
+
 async def main():
     await init_db()
 
-    bot = Bot(token=TOKEN)
+    # Register health check functions with the threaded health server
+    _set_checkers(_db_health_check, _bmkg_health_check)
+
+    bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
     dp.include_router(admin.router)
@@ -250,9 +404,14 @@ async def main():
     scheduler.add_job(daily_weather_job, "cron", hour=16, minute=45, args=[bot, "Sore"])
     scheduler.add_job(nowcast_alert_job, "interval", minutes=10, args=[bot])
     scheduler.add_job(cleanup_old_alerts, "cron", day_of_week='sun', hour=0)
+    scheduler.add_job(retry_failed_sends_job, "interval", minutes=5, args=[bot])
 
     scheduler.start()
-    logger.info("Bot berjalan dalam mode polling...")
+
+    # Start health server (Gatus-compatible) in background thread
+    start_health_server()
+
+    logger.info("Bot berjalan dalam mode polling...", extra={"bot_mode": "OPEN"})
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -266,6 +425,7 @@ async def main():
     finally:
         await shutdown()
         await bot.session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -80,19 +80,38 @@ async def cmd_whitelist(message: types.Message):
         return
 
     if args[1] == "remove" and len(args) >= 3:
-        try:
-            chat_id = int(args[2])
-        except ValueError:
-            return await message.answer("❌ Chat ID harus berupa angka.", parse_mode="Markdown")
+        chat_id_str = args[2]
+        if not _validate_chat_id(chat_id_str):
+            return await message.answer("❌ Chat ID harus berupa angka valid.", parse_mode="Markdown")
+        chat_id = int(chat_id_str)
         await remove_from_whitelist(chat_id)
         await message.answer(f"✅ User *{chat_id}* berhasil dihapus dari whitelist.", parse_mode="Markdown")
         return
 
-    try:
-        chat_id = int(args[1])
-    except ValueError:
-        await message.answer("❌ Chat ID harus berupa angka.\nGunakan: `/whitelist [chat_id]`", parse_mode="Markdown")
+    chat_id_str = args[1]
+    if not _validate_chat_id(chat_id_str):
+        await message.answer("❌ Chat ID harus berupa angka valid.\nGunakan: `/whitelist [chat_id]`", parse_mode="Markdown")
+        return
+
+    chat_id = int(chat_id_str)
+
+    # Verify user exists
+    from database import get_user_info
+    user_exists = await get_user_info(chat_id)
+    if not user_exists:
+        await message.answer(f"⚠️ Pengguna *{chat_id}* belum pernah menggunakan bot ini. Tambahkan ke whitelist? Gunakan `/whitelist force [chat_id]`.", parse_mode="Markdown")
         return
 
     await add_to_whitelist(chat_id)
     await message.answer(f"✅ User *{chat_id}* berhasil ditambahkan ke whitelist.", parse_mode="Markdown")
+
+
+def _validate_chat_id(chat_id_str: str) -> bool:
+    """Validate that the string is a valid Telegram chat_id."""
+    if not chat_id_str.lstrip("-").isdigit():
+        return False
+    try:
+        val = int(chat_id_str)
+        return -9223372036854775808 <= val <= 9223372036854775807
+    except (ValueError, OverflowError):
+        return False

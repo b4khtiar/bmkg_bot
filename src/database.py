@@ -1,9 +1,12 @@
 import aiosqlite
 import logging
+import json
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = "data/bot_data.db"
+WEATHER_CACHE_TTL_MIN = 15
 _db_connection = None
 
 async def get_db():
@@ -49,6 +52,25 @@ async def init_db():
             notify_weather INTEGER DEFAULT 1,
             notify_nowcast INTEGER DEFAULT 1,
             FOREIGN KEY (chat_id) REFERENCES users(chat_id)
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS weather_cache (
+            adm_code TEXT PRIMARY KEY,
+            cached_json TEXT NOT NULL,
+            cached_at DATETIME NOT NULL
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS pending_sends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            photo_url TEXT,
+            retry_count INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -174,3 +196,68 @@ async def get_users_with_pref(pref_name: str):
         f"WHERE p.{pref_name} = 1"
     )
     return await cursor.fetchall()
+
+
+async def cache_weather(adm_code: str, weather_json: dict):
+    """Store fresh BMKG weather JSON in cache."""
+    db = await get_db()
+    await db.execute(
+        "INSERT OR REPLACE INTO weather_cache (adm_code, cached_json, cached_at) VALUES (?, ?, ?)",
+        (adm_code, json.dumps(weather_json), datetime.now().isoformat())
+    )
+    await db.commit()
+
+
+async def get_cached_weather(adm_code: str):
+    """Return cached weather JSON if within TTL, else None."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT cached_json, cached_at FROM weather_cache WHERE adm_code = ?",
+        (adm_code,)
+    )
+    row = await cursor.fetchone()
+    if row:
+        try:
+            cached_at = datetime.fromisoformat(row["cached_at"])
+            if datetime.now() - cached_at < timedelta(minutes=WEATHER_CACHE_TTL_MIN):
+                return json.loads(row["cached_json"]), cached_at.isoformat()
+        except (ValueError, json.JSONDecodeError):
+            pass
+    return None
+
+
+async def enqueue_failed_send(chat_id: int, message: str, photo_url: str = None):
+    """Queue a message that failed to send for later retry."""
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO pending_sends (chat_id, message, photo_url) VALUES (?, ?, ?)",
+        (chat_id, message, photo_url)
+    )
+    await db.commit()
+
+
+async def retry_pending_sends():
+    """Retry failed sends. Caller must handle sending via bot. Returns (successes, failures, rows)."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT id, chat_id, message, photo_url, retry_count FROM pending_sends "
+        "ORDER BY created_at ASC LIMIT 50"
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return rows
+
+
+async def delete_pending_send(send_id: int):
+    db = await get_db()
+    await db.execute("DELETE FROM pending_sends WHERE id = ?", (send_id,))
+    await db.commit()
+
+
+async def increment_retry_count(send_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE pending_sends SET retry_count = retry_count + 1 WHERE id = ?",
+        (send_id,)
+    )
+    await db.commit()
