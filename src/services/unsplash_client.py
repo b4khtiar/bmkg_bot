@@ -73,7 +73,8 @@ async def _fetch_image(query: str) -> tuple[str | None, str | None]:
             return None, None
 
         photo = results[0]
-        image_url = photo.get("urls", {}).get("regular")
+        # "small" = 400px (~20-40KB) — fast on mobile data, good enough for Telegram.
+        image_url = photo.get("urls", {}).get("small")
         photographer = (photo.get("user") or {}).get("name", "")
         if not image_url:
             return None, None
