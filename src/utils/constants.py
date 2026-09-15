@@ -92,3 +92,40 @@ WEATHER_EMOJI = {
 }
 
 _VALID_BOT_MODES = {"OPEN", "WHITELIST", "MAINTENANCE"}
+
+# Groups for weather photo selection (Unsplash). Non-overlapping.
+IMAGE_WEATHER_GROUPS = {
+    "clear": {0, 1, 2},
+    "cloudy": {3, 4},
+    "foggy": {5, 10, 45},
+    "light_rain": {60, 61, 62, 80, 81},
+    "heavy_rain": {63, 64, 65, 66, 67, 82},
+    "thunderstorm": {95, 96, 97},
+}
+
+# Per-code Unsplash search query. Codes sharing a group may use distinct
+# queries so the same broadcast never feels repetitive across conditions.
+WEATHER_QUERY_MAP = {
+    "0": "bright sunny blue sky",
+    "1": "sunny sky scattered clouds",
+    "2": "partly cloudy sunny day",
+    "3": "cloudy grey sky",
+    "4": "overcast dark clouds",
+    "5": "haze city skyline",
+    "10": "smoky haze sky",
+    "45": "foggy misty landscape morning",
+    "60": "light rain drops window",
+    "61": "rainy day umbrella street",
+    "62": "rain clouds grey sky",
+    "63": "heavy rain storm street",
+    "64": "tropical rain downpour",
+    "65": "flood rain storm",
+    "66": "cold rain frost",
+    "67": "freezing rain ice",
+    "80": "tropical rain shower",
+    "81": "rain shower umbrella",
+    "82": "rainstorm dark clouds",
+    "95": "thunderstorm lightning sky",
+    "96": "lightning storm dramatic clouds",
+    "97": "severe thunderstorm night",
+}

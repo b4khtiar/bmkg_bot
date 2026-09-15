@@ -74,6 +74,15 @@ async def init_db():
         )
     """)
 
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS weather_image_cache (
+            condition_group TEXT PRIMARY KEY,
+            image_url TEXT NOT NULL,
+            photographer TEXT NOT NULL,
+            cached_at DATETIME NOT NULL
+        )
+    """)
+
     await db.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('bot_mode', 'OPEN')")
     await db.commit()
 
@@ -261,3 +270,25 @@ async def increment_retry_count(send_id: int):
         (send_id,)
     )
     await db.commit()
+
+
+async def cache_weather_image(condition_group: str, image_url: str, photographer: str, cached_at: str):
+    """Store an Unsplash image URL by weather condition group."""
+    db = await get_db()
+    await db.execute(
+        "INSERT OR REPLACE INTO weather_image_cache (condition_group, image_url, photographer, cached_at) VALUES (?, ?, ?, ?)",
+        (condition_group, image_url, photographer, cached_at)
+    )
+    await db.commit()
+
+
+async def get_cached_weather_image(condition_group: str):
+    """Return cached image row for a condition group, or None."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT image_url, photographer, cached_at FROM weather_image_cache WHERE condition_group = ?",
+        (condition_group,)
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return row

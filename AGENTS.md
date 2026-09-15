@@ -15,6 +15,7 @@ podman-compose build && podman-compose up -d
 ## Environment
 
 - **Required env vars** (`.env`): `BOT_TOKEN`, `ADMIN_CHAT_ID`
+- **Optional env vars**: `UNSPLASH_ACCESS_KEY` (weather photos — bot runs without it, text-only), `LOG_LEVEL`, `HEALTH_SERVER_PORT`, `BMKG_FAILURES_ALERT_THRESHOLD`, `BROADCAST_FAILURE_RATE`, `DB_TIMEOUT_ALERT_SECONDS`
 - **Timezone**: defaults to `Asia/Jakarta` (Dockerfile hardcodes `TZ=Asia/Jakarta`; docker-compose overrides via `- TZ=Asia/Jakarta`). `ADMIN_CHAT_ID` is used in `src/main.py` and `handlers/admin.py` — mismatch breaks admin commands.
 - **Database**: SQLite at `data/bot_data.db` (gitignored). Connection is a process-wide singleton in `src/database.py` (`_db_connection`); opened with WAL mode + 5s busy timeout. Initialized via `init_db()` on startup.
 - **Docker note**: Dockerfile copies `src/` into `/app/src/`, but DB path is relative (`data/bot_data.db`). docker-compose mounts `./data:/app/data:z` to persist. If you run `python src/main.py` locally, DB is created at `data/bot_data.db` in the working directory.
@@ -38,6 +39,7 @@ podman-compose build && podman-compose up -d
 | `src/main.py` | Bot setup, scheduler, broadcast jobs, graceful shutdown, health server startup |
 | `src/database.py` | All SQLite access via `aiosqlite`, singleton connection, `weather_cache` & `pending_sends` tables |
 | `src/services/bmkg_api.py` | HTTP fetch (httpx, retry, URL allowlist, circuit breaker), BMKG JSON/XML parsing, cache fallback |
+| `src/services/unsplash_client.py` | Unsplash photo fetch by weather condition group; caches by group (memory + SQLite, 6h TTL) |
 | `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/gempa`, `/nowcast`, `/atur_notif`, `/ping` |
 | `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` (validated) |
 | `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `WEATHER_CODES`, `WEATHER_EMOJI`, `_VALID_BOT_MODES` |
@@ -90,6 +92,7 @@ python src/main.py
 - **Broadcast failure monitoring**: `alerts.py:check_broadcast_failure_rate()` returns True if failure rate exceeds `BROADCAST_FAILURE_RATE` (default 0.2). Triggers immediate alert instead of just a summary log.
 - **Failed message retries**: Messages that fail to send are queued in `pending_sends` table. Retried every 5 minutes via `retry_failed_sends_job`. Dropped after `MAX_SEND_RETRIES` (3) failed attempts.
 - **Weather cache**: 15-min TTL SQLite cache for weather data. Served with banner "⚠️ Data cadangan..." when BMKG API is unreachable. Circuit breaker prevents further requests until cooldown expires.
+- **Unsplash weather images**: Weather messages include themed photos. `UNSPLASH_ACCESS_KEY` required; weather messages fall back to text-only if unset or on fetch failure. Images cached by condition group (clear/cloudy/foggy/light_rain/heavy_rain/thunderstorm) with 6h TTL, both in-memory (`services/unsplash_client.py`) and SQLite (`weather_image_cache` table). ~8 unique groups → well under Unsplash demo tier (50 req/hour). Parsers return `{"text", "photo_url", "photographer"}` — callers check `photo_url` before using `send_photo`.
 - **Logging**: Structured JSON logs to stdout. Uses `logging_config.py` with `StructuredFormatter` that includes `bot_mode` context on every record.
 - **Env vars**: `BOT_TOKEN` and `ADMIN_CHAT_ID` are strictly required at startup — bot crashes with `RuntimeError` if missing.
 

@@ -85,8 +85,16 @@ async def cmd_current_weather(message: types.Message):
     if not raw_data:
         return await message.answer("Gagal mengambil data cuaca. Silakan coba lagi nanti.")
 
-    msg = parse_weather_current(raw_data)
-    await message.answer(msg, parse_mode="HTML")
+    result = await parse_weather_current(raw_data)
+    text = result.get("text")
+    photo_url = result.get("photo_url")
+    if photo_url:
+        try:
+            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
+        except Exception:
+            await message.answer(text, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("prakiraan"))
 async def cmd_extended_forecast(message: types.Message):
@@ -98,8 +106,16 @@ async def cmd_extended_forecast(message: types.Message):
     if not raw_data:
         return await message.answer("Gagal mengambil data prakiraan cuaca. Silakan coba lagi nanti.")
 
-    msg = parse_weather_multi_day(raw_data, days=3)
-    await message.answer(msg, parse_mode="HTML")
+    result = await parse_weather_multi_day(raw_data, days=3)
+    text = result.get("text")
+    photo_url = result.get("photo_url")
+    if photo_url:
+        try:
+            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
+        except Exception:
+            await message.answer(text, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("gempa"))
 async def cmd_earthquake(message: types.Message):

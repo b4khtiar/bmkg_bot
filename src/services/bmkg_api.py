@@ -144,14 +144,60 @@ def _extract_cache_metadata(json_response):
     return is_cached, cached_at
 
 
-def parse_weather_daily_brief(json_response):
+# Severity ranks for image selection (higher = more dramatic image).
+_SEVERITY_RANK = {
+    "thunderstorm": 6,
+    "heavy_rain": 5,
+    "light_rain": 4,
+    "foggy": 3,
+    "cloudy": 2,
+    "clear": 1,
+}
+
+
+def _most_severe_code(entries):
+    """Given a list of BMKG weather entries, return the weather code with the
+    highest severity, so the photo matches the most notable condition."""
+    from utils.constants import IMAGE_WEATHER_GROUPS
+    best_code = None
+    best_rank = -1
+    for entry in entries or []:
+        code = entry.get("weather")
+        if code is None:
+            continue
+        try:
+            code_int = int(code)
+        except (TypeError, ValueError):
+            continue
+        for group, codes in IMAGE_WEATHER_GROUPS.items():
+            if code_int in codes and _SEVERITY_RANK[group] > best_rank:
+                best_rank = _SEVERITY_RANK[group]
+                best_code = str(code_int)
+                break
+    return best_code
+
+
+async def _build_weather_result(text: str, weather_code: str) -> dict:
+    """Attach an Unsplash photo to the weather text, if available."""
+    from services.unsplash_client import get_weather_photo
+    photo_url, photographer = await get_weather_photo(weather_code)
+    if photo_url and photographer:
+        text = f"{text}\n\n📸 <i>Foto: {photographer} / Unsplash</i>"
+    return {
+        "text": text,
+        "photo_url": photo_url,
+        "photographer": photographer,
+    }
+
+
+async def parse_weather_daily_brief(json_response):
     is_cached, cached_at = _extract_cache_metadata(json_response)
     cache_banner = _format_cache_banner(cached_at) if (is_cached and cached_at) else ""
 
     try:
         all_entries = _flatten_today_entries(json_response)
         if not all_entries:
-            return f"{cache_banner}Gagal memproses briefing cuaca."
+            return {"text": f"{cache_banner}Gagal memproses briefing cuaca.", "photo_url": None, "photographer": None}
 
         lokasi = json_response.get('lokasi', {})
 
@@ -186,12 +232,15 @@ def parse_weather_daily_brief(json_response):
             f"💡 <b>INSIGHT</b>\n{tips}"
             f"{trend_section}"
         )
-        return f"{cache_banner}{msg}" if cache_banner else msg
+        text = f"{cache_banner}{msg}" if cache_banner else msg
+        code = _most_severe_code(all_entries)
+        return await _build_weather_result(text, code)
     except Exception as e:
         logger.error(f"Gagal memproses briefing cuaca: {e}")
-        return f"{cache_banner}Gagal memproses briefing cuaca."
+        return {"text": f"{cache_banner}Gagal memproses briefing cuaca.", "photo_url": None, "photographer": None}
 
-def parse_weather_current(json_response):
+
+async def parse_weather_current(json_response):
     """Tampilkan cuaca untuk jam terdekat dengan waktu sekarang."""
     is_cached, cached_at = _extract_cache_metadata(json_response)
     cache_banner = _format_cache_banner(cached_at) if (is_cached and cached_at) else ""
@@ -199,7 +248,7 @@ def parse_weather_current(json_response):
     try:
         all_entries = _flatten_today_entries(json_response)
         if not all_entries:
-            return f"{cache_banner}Tidak ada data cuaca."
+            return {"text": f"{cache_banner}Tidak ada data cuaca.", "photo_url": None, "photographer": None}
 
         now = datetime.now()
         selected = min(all_entries, key=lambda x: abs(
@@ -227,10 +276,11 @@ def parse_weather_current(json_response):
             f"💨 <code>{ws} km/jam</code> ({wd})\n\n"
             f"<i>📡 Sumber: BMKG</i>"
         )
-        return f"{cache_banner}{msg}" if cache_banner else msg
+        text = f"{cache_banner}{msg}" if cache_banner else msg
+        return await _build_weather_result(text, icon_code)
     except Exception as e:
         logger.error(f"Gagal memproses cuaca saat ini: {e}")
-        return f"{cache_banner}Gagal memproses data cuaca."
+        return {"text": f"{cache_banner}Gagal memproses data cuaca.", "photo_url": None, "photographer": None}
 
 def parse_nowcast_rss(xml_string, user_city_name=None):
     """
@@ -394,17 +444,17 @@ def summarize_nowcast_rss(nowcast_data, province_filter=None):
         f"{count_info}"
     )
 
-def parse_weather_multi_day(json_response, days=3):
+async def parse_weather_multi_day(json_response, days=3):
     if not json_response:
-        return "Tidak ada data prakiraan cuaca."
+        return {"text": "Tidak ada data prakiraan cuaca.", "photo_url": None, "photographer": None}
 
     groups = json_response.get('data', [])
     if not groups:
-        return "Tidak ada data prakiraan cuaca."
+        return {"text": "Tidak ada data prakiraan cuaca.", "photo_url": None, "photographer": None}
 
     cuaca_groups = groups[0].get('cuaca', [])
     if not cuaca_groups:
-        return "Tidak ada data prakiraan cuaca."
+        return {"text": "Tidak ada data prakiraan cuaca.", "photo_url": None, "photographer": None}
 
     lokasi = json_response.get('lokasi', {})
     nama_tempat = f"{lokasi.get('desa')}, {lokasi.get('kecamatan')}"
@@ -412,12 +462,13 @@ def parse_weather_multi_day(json_response, days=3):
     day_names = ["Hari Ini", "Besok", "Lusa"]
     output = [f"📅 <b>PRAKIRAAN CUACA 3 HARI</b>\n📍 <b>{nama_tempat}</b>\n"]
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    all_entries_for_photo = []
 
     for day_idx in range(min(days, len(cuaca_groups))):
         entries = cuaca_groups[day_idx]
         if not entries:
             continue
+        all_entries_for_photo.extend(entries)
 
         day_label = day_names[day_idx] if day_idx < len(day_names) else f"Hari ke-{day_idx+1}"
         output.append(f"\n━━━ {day_label} ━━━")
@@ -446,7 +497,9 @@ def parse_weather_multi_day(json_response, days=3):
             output.extend(time_lines)
 
     output.append("\n━━━━━━━━━━━━━━\n<i>📡 Sumber: BMKG</i>")
-    return "\n".join(output)
+    text = "\n".join(output)
+    code = _most_severe_code(all_entries_for_photo)
+    return await _build_weather_result(text, code)
 
 async def fetch_weather_data(adm_code):
     """Fetch weather data. Uses circuit breaker. Returns cached data with metadata on failure."""

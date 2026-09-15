@@ -200,7 +200,6 @@ async def check_quake_job(bot):
 async def daily_weather_job(bot, time_label):
     users = await get_users_with_pref("notify_weather")
     weather_cache = {}
-    cache_banners = {}
 
     # Fetch weather per unique adm_code, with per-user graceful degradation
     for user_row in users:
@@ -213,16 +212,22 @@ async def daily_weather_job(bot, time_label):
         raw_data = await fetch_weather_data(adm_code)
         if raw_data:
             if time_label == "Pagi":
-                weather_cache[adm_code] = parse_weather_daily_brief(raw_data)
+                weather_cache[adm_code] = await parse_weather_daily_brief(raw_data)
             else:
-                weather_cache[adm_code] = parse_weather_current(raw_data)
+                weather_cache[adm_code] = await parse_weather_current(raw_data)
 
     tasks = []
     for user_row in users:
         adm_code = user_row['adm_code']
-        msg = weather_cache.get(adm_code)
-        if msg:
-            tasks.append(_send_msg_sem(bot, user_row['chat_id'], msg))
+        result = weather_cache.get(adm_code)
+        if not result:
+            continue
+        text = result.get("text")
+        photo_url = result.get("photo_url")
+        if photo_url:
+            tasks.append(_send_photo_sem(bot, user_row['chat_id'], photo_url, text))
+        else:
+            tasks.append(_send_msg_sem(bot, user_row['chat_id'], text))
 
     results = await asyncio.gather(*tasks) if tasks else []
     success = sum(1 for r in results if r)
