@@ -94,7 +94,7 @@ async def fetch_with_retry(url, retries=2, delay=1.5, text=False, json=False, pa
                 return response.text if text else response.json() if json else response
             logger.warning(f"HTTP {response.status_code} untuk {url} (percobaan {attempt+1}/{retries+1})")
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-            logger.warning(f"Gagal fetch {url}: {e} (percobaan {attempt+1}/{retries+1})")
+            logger.warning(f"Gagal fetch {url}: {type(e).__name__}: {e} (percobaan {attempt+1}/{retries+1})")
             if attempt < retries:
                 await asyncio.sleep(delay * (attempt + 1))
     return None

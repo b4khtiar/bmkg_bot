@@ -221,6 +221,16 @@ async def daily_weather_job(bot, time_label):
         adm_code = user_row['adm_code']
         result = weather_cache.get(adm_code)
         if not result:
+            # ponytail: silent skip made broadcasts report "0 gagal" while users got nothing.
+            # Fallback message keeps counts honest and users informed.
+            if not adm_code:
+                fallback = "⚙️ Atur lokasi Anda dulu via /atur_notif untuk menerima update cuaca."
+            else:
+                fallback = (
+                    f"⚠️ Data cuaca ({time_label}) sedang tidak tersedia untuk lokasi Anda.\n"
+                    f"Coba /cuaca untuk data terkini."
+                )
+            tasks.append(_send_msg_sem(bot, user_row['chat_id'], fallback))
             continue
         text = result.get("text")
         photo_url = result.get("photo_url")
@@ -232,8 +242,9 @@ async def daily_weather_job(bot, time_label):
     results = await asyncio.gather(*tasks) if tasks else []
     success = sum(1 for r in results if r)
     failed = len(results) - success
+    no_data = sum(1 for u in users if not weather_cache.get(u['adm_code']))
 
-    logger.info(f"Broadcast cuaca ({time_label}) selesai: {success} berhasil, {failed} gagal")
+    logger.info(f"Broadcast cuaca ({time_label}) selesai: {success} berhasil, {failed} gagal, {no_data} tanpa data")
     if failed > 0 and ADMIN_ID:
         if check_broadcast_failure_rate(success, len(results)):
             await send_admin_alert(
