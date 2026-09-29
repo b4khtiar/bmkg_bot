@@ -40,7 +40,7 @@ podman-compose build && podman-compose up -d
 | `src/database.py` | All SQLite access via `aiosqlite`, singleton connection, `weather_cache` & `pending_sends` tables |
 | `src/services/bmkg_api.py` | HTTP fetch (httpx, retry, URL allowlist, circuit breaker), BMKG JSON/XML parsing, cache fallback |
 | `src/services/unsplash_client.py` | Unsplash photo fetch by weather condition group; caches by group (memory + SQLite, 6h TTL) |
-| `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/gempa`, `/nowcast`, `/atur_notif`, `/ping` |
+| `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/cuaca_hari_ini`, `/gempa`, `/nowcast`, `/atur_notif`, `/ping` |
 | `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` (validated) |
 | `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `WEATHER_CODES`, `WEATHER_EMOJI`, `_VALID_BOT_MODES` |
 | `src/utils/keyboards.py` | Inline keyboard builders (with 64-byte callback_data assertions) |

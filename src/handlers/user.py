@@ -8,7 +8,7 @@ from utils.keyboards import get_province_keyboard, get_city_keyboard, get_start_
 from services.bmkg_api import (
     fetch_weather_data, parse_weather_current, parse_weather_daily_brief,
     fetch_latest_quake, fetch_nowcast_alerts, summarize_nowcast_rss,
-    parse_weather_multi_day
+    parse_weather_multi_day, parse_weather_hourly_today
 )
 from utils.constants import get_province_name
 import os, time, logging
@@ -107,6 +107,27 @@ async def cmd_extended_forecast(message: types.Message):
         return await message.answer("Gagal mengambil data prakiraan cuaca. Silakan coba lagi nanti.")
 
     result = await parse_weather_multi_day(raw_data, days=3)
+    text = result.get("text")
+    photo_url = result.get("photo_url")
+    if photo_url:
+        try:
+            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
+        except Exception:
+            await message.answer(text, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
+
+@router.message(Command("cuaca_hari_ini"))
+async def cmd_hourly_today(message: types.Message):
+    user_data = await get_user_info(message.chat.id)
+    if not user_data or not user_data['adm_code']:
+        return await message.answer("Silakan atur lokasi dulu dengan /start")
+
+    raw_data = await fetch_weather_data(user_data['adm_code'])
+    if not raw_data:
+        return await message.answer("Gagal mengambil data cuaca. Silakan coba lagi nanti.")
+
+    result = await parse_weather_hourly_today(raw_data)
     text = result.get("text")
     photo_url = result.get("photo_url")
     if photo_url:

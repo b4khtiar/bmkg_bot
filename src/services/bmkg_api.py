@@ -282,6 +282,48 @@ async def parse_weather_current(json_response):
         logger.error(f"Gagal memproses cuaca saat ini: {e}")
         return {"text": f"{cache_banner}Gagal memproses data cuaca.", "photo_url": None, "photographer": None}
 
+async def parse_weather_hourly_today(json_response):
+    """Tampilkan semua jam prakiraan untuk hari ini (per jam)."""
+    is_cached, cached_at = _extract_cache_metadata(json_response)
+    cache_banner = _format_cache_banner(cached_at) if (is_cached and cached_at) else ""
+
+    try:
+        all_entries = _flatten_today_entries(json_response)
+        if not all_entries:
+            return {"text": f"{cache_banner}Tidak ada data cuaca.", "photo_url": None, "photographer": None}
+
+        # _flatten_today_entries mencakup semua grup hari (hari ini/besok/lusa);
+        # filter hanya tanggal hari ini.
+        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        all_entries = [e for e in all_entries if str(e.get('local_datetime', '')).startswith(today_prefix)]
+        if not all_entries:
+            return {"text": f"{cache_banner}Tidak ada data cuaca hari ini.", "photo_url": None, "photographer": None}
+
+        lokasi = json_response.get('lokasi', {})
+        nama_tempat = f"{lokasi.get('desa')}, {lokasi.get('kecamatan')}"
+
+        output = [f"⏰ <b>CUACA PER JAM HARI INI</b>\n📍 <b>{nama_tempat}</b>\n"]
+
+        current_prefix = datetime.now().strftime("%Y-%m-%d %H")
+        for entry in sorted(all_entries, key=lambda x: x.get('local_datetime', '')):
+            local_dt = entry.get('local_datetime', '')
+            hour = local_dt.split(' ')[1][:5] if ' ' in local_dt else '—'
+            weather_code = str(entry.get('weather', ''))
+            emoji = WEATHER_EMOJI.get(weather_code, '❓')
+            temp = entry.get('t', '?')
+            hu = entry.get('hu', '?')
+            marker = " 📍" if local_dt.startswith(current_prefix) else ""
+            output.append(f"{emoji} <code>{hour}</code>  {entry.get('weather_desc', '')}  {temp}°C  💧{hu}%{marker}")
+
+        output.append("\n<i>📡 Sumber: BMKG</i>")
+        text = f"{cache_banner}" + "\n".join(output)
+        code = _most_severe_code(all_entries)
+        return await _build_weather_result(text, code)
+    except Exception as e:
+        logger.error(f"Gagal memproses cuaca per jam: {e}")
+        return {"text": f"{cache_banner}Gagal memproses data cuaca.", "photo_url": None, "photographer": None}
+
+
 def parse_nowcast_rss(xml_string, user_city_name=None):
     """
     Scan RSS untuk mencari berita yang relevan dengan kota user.
@@ -480,21 +522,20 @@ async def parse_weather_multi_day(json_response, days=3):
         max_wind = max(float(w.get('ws', 0)) for w in entries)
 
         rain_icon = "🌧️" if has_rain else "☀️"
-        output.append(f"🌡️ <code>{temp_min:.0f}°C</code> – <code>{temp_max:.0f}°C</code> {rain_icon}")
-        output.append(f"💧 <code>{avg_hu:.0f}%</code> | 💨 <code>{max_wind:.0f} km/jam</code>")
+        output.append(f"{rain_icon} <code>{temp_min:.0f}–{temp_max:.0f}°C</code> 💧<code>{avg_hu:.0f}%</code> 💨<code>{max_wind:.0f}</code>")
 
-        time_lines = []
-        for w in entries:
-            local_dt = w.get('local_datetime', '')
-            hour = local_dt.split(' ')[1][:5] if ' ' in local_dt else '—'
-            weather_code = str(w.get('weather', ''))
+        slot_parts = []
+        for slot_hour, slot_label in ((8, "08.00"), (17, "17.00")):
+            entry = _find_nearest_entry(entries, slot_hour)
+            if not entry:
+                continue
+            weather_code = str(entry.get('weather', ''))
             emoji = WEATHER_EMOJI.get(weather_code, '❓')
-            temp = w.get('t', '?')
-            hu = w.get('hu', '?')
-            time_lines.append(f"• {emoji} <code>{hour}</code>  {temp}°C  💧{hu}%")
-
-        if time_lines:
-            output.extend(time_lines)
+            weather_desc = entry.get('weather_desc', '')
+            temp = entry.get('t', '?')
+            slot_parts.append(f"{emoji} <code>{slot_label}</code> {weather_desc} {temp}°C")
+        if slot_parts:
+            output.append(" · ".join(slot_parts))
 
     output.append("\n━━━━━━━━━━━━━━\n<i>📡 Sumber: BMKG</i>")
     text = "\n".join(output)

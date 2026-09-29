@@ -24,7 +24,8 @@ Bot Telegram untuk memantau data cuaca, gempa bumi, dan peringatan dini cuaca (n
 |---------|-----------|
 | `/start` | Registrasi awal & atur lokasi |
 | `/cuaca` | Cuaca saat ini (jam terdekat) |
-| `/prakiraan` | Prakiraan cuaca 3 hari ke depan |
+| `/prakiraan` | Prakiraan cuaca 3 hari ke depan (ringkasan + 08.00 & 17.00) |
+| `/cuaca_hari_ini` | Cuaca per jam untuk hari ini |
 | `/gempa` | Informasi gempa bumi terkini |
 | `/nowcast` | Peringatan dini cuaca (filter provinsi) |
 | `/atur_notif` | Atur jenis notifikasi yang diterima |
