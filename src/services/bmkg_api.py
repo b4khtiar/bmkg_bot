@@ -292,8 +292,9 @@ async def parse_weather_hourly_today(json_response):
         if not all_entries:
             return {"text": f"{cache_banner}Tidak ada data cuaca.", "photo_url": None, "photographer": None}
 
-        # _flatten_today_entries mencakup semua grup hari (hari ini/besok/lusa);
-        # filter hanya tanggal hari ini.
+        # _flatten_today_entries only reads data[0], but BMKG has been known to
+        # include next-day entries in that group. The date filter is load-bearing
+        # — do not drop it as redundant.
         today_prefix = datetime.now().strftime("%Y-%m-%d")
         all_entries = [e for e in all_entries if str(e.get('local_datetime', '')).startswith(today_prefix)]
         if not all_entries:

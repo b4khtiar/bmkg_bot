@@ -6,7 +6,7 @@ from database import (
 )
 from utils.keyboards import get_province_keyboard, get_city_keyboard, get_start_keyboard, get_notif_prefs_keyboard
 from services.bmkg_api import (
-    fetch_weather_data, parse_weather_current, parse_weather_daily_brief,
+    fetch_weather_data, parse_weather_current,
     fetch_latest_quake, fetch_nowcast_alerts, summarize_nowcast_rss,
     parse_weather_multi_day, parse_weather_hourly_today
 )
@@ -18,6 +18,32 @@ ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 logger = logging.getLogger(__name__)
 
 _bot_start_time = time.time()
+
+# Telegram rejects photo captions over 1024 chars. Going over would raise
+# inside answer_photo and land in the fallback path, masking the real cause.
+_CAPTION_LIMIT = 1024
+
+
+async def _reply_weather(message: types.Message, text: str, photo_url):
+    """Send weather text with its themed photo when one is available."""
+    if not photo_url:
+        return await message.answer(text, parse_mode="HTML")
+
+    if len(text) > _CAPTION_LIMIT:
+        logger.info(
+            f"Foto dilewati: caption {len(text)} karakter melebihi {_CAPTION_LIMIT}",
+            extra={"chat_id": message.chat.id}
+        )
+        return await message.answer(text, parse_mode="HTML")
+
+    try:
+        await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
+    except Exception:
+        logger.warning(
+            "Gagal kirim foto cuaca, fallback ke teks",
+            exc_info=True, extra={"chat_id": message.chat.id}
+        )
+        await message.answer(text, parse_mode="HTML")
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -86,15 +112,7 @@ async def cmd_current_weather(message: types.Message):
         return await message.answer("Gagal mengambil data cuaca. Silakan coba lagi nanti.")
 
     result = await parse_weather_current(raw_data)
-    text = result.get("text")
-    photo_url = result.get("photo_url")
-    if photo_url:
-        try:
-            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
-        except Exception:
-            await message.answer(text, parse_mode="HTML")
-    else:
-        await message.answer(text, parse_mode="HTML")
+    await _reply_weather(message, result.get("text"), result.get("photo_url"))
 
 @router.message(Command("prakiraan"))
 async def cmd_extended_forecast(message: types.Message):
@@ -107,19 +125,7 @@ async def cmd_extended_forecast(message: types.Message):
         return await message.answer("Gagal mengambil data prakiraan cuaca. Silakan coba lagi nanti.")
 
     result = await parse_weather_multi_day(raw_data, days=3)
-    text = result.get("text")
-    photo_url = result.get("photo_url")
-    if photo_url:
-        try:
-            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
-        except Exception:
-            logger.warning(
-                "Gagal kirim foto cuaca, fallback ke teks",
-                exc_info=True, extra={"chat_id": message.chat.id}
-            )
-            await message.answer(text, parse_mode="HTML")
-    else:
-        await message.answer(text, parse_mode="HTML")
+    await _reply_weather(message, result.get("text"), result.get("photo_url"))
 
 @router.message(Command("cuaca_hari_ini"))
 async def cmd_hourly_today(message: types.Message):
@@ -132,26 +138,7 @@ async def cmd_hourly_today(message: types.Message):
         return await message.answer("Gagal mengambil data cuaca. Silakan coba lagi nanti.")
 
     result = await parse_weather_hourly_today(raw_data)
-    text = result.get("text")
-    photo_url = result.get("photo_url")
-    # Telegram rejects captions over 1024 chars, which would land in the
-    # photo-send exception path and mask the real cause. Skip photo instead.
-    if photo_url and len(text) <= 1024:
-        try:
-            await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
-        except Exception:
-            logger.warning(
-                "Gagal kirim foto cuaca per jam, fallback ke teks",
-                exc_info=True, extra={"chat_id": message.chat.id}
-            )
-            await message.answer(text, parse_mode="HTML")
-    else:
-        if photo_url:
-            logger.info(
-                f"Foto dilewati: caption {len(text)} karakter melebihi batas 1024",
-                extra={"chat_id": message.chat.id}
-            )
-        await message.answer(text, parse_mode="HTML")
+    await _reply_weather(message, result.get("text"), result.get("photo_url"))
 
 @router.message(Command("gempa"))
 async def cmd_earthquake(message: types.Message):
