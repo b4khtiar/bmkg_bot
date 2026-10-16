@@ -111,7 +111,12 @@ def _flatten_today_entries(json_response):
     return all_entries
 
 def _find_nearest_entry(entries, target_hour):
-    """Cari entry dengan jam terdekat ke target_hour."""
+    """Cari entry dengan jam terdekat ke target_hour.
+
+    Hours are compared hour-only, so callers must pass entries from a single day.
+    Ties (BMKG's 3-hourly grid makes them rare) resolve to the first entry seen;
+    changing that to a deliberate rule would alter /cuaca and /prakiraan output.
+    """
     best = None
     best_diff = 999
     for entry in entries:
@@ -292,10 +297,15 @@ async def parse_weather_hourly_today(json_response):
         if not all_entries:
             return {"text": f"{cache_banner}Tidak ada data cuaca.", "photo_url": None, "photographer": None}
 
-        # _flatten_today_entries only reads data[0], but BMKG has been known to
-        # include next-day entries in that group. The date filter is load-bearing
-        # — do not drop it as redundant.
-        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        # Scope to today using BMKG's own timestamps, not datetime.now(). The
+        # server clock is WIB-equivalent only if TZ is set correctly, and it
+        # isn't guaranteed (a bare `docker run` gets UTC, which breaks the first
+        # hours of the WIB day). min() because data[0] starts at today 00:00 WIB
+        # but can spill into tomorrow — the earliest date is today's.
+        # Load-bearing filter — do not drop it as redundant.
+        today_prefix = min(
+            str(e.get('local_datetime', ''))[:10] for e in all_entries
+        )
         all_entries = [e for e in all_entries if str(e.get('local_datetime', '')).startswith(today_prefix)]
         if not all_entries:
             return {"text": f"{cache_banner}Tidak ada data cuaca hari ini.", "photo_url": None, "photographer": None}
@@ -305,15 +315,24 @@ async def parse_weather_hourly_today(json_response):
 
         output = [f"⏰ <b>CUACA PER JAM HARI INI</b>\n📍 <b>{nama_tempat}</b>\n"]
 
-        current_prefix = datetime.now().strftime("%Y-%m-%d %H")
-        for entry in sorted(all_entries, key=lambda x: x.get('local_datetime', '')):
+        entries_sorted = sorted(all_entries, key=lambda x: x.get('local_datetime', ''))
+        # Mark the nearest slot rather than the exact clock hour: BMKG entries
+        # are 3-hourly, so an exact-hour match leaves the table unanchored late
+        # in the day (nothing matches after the last entry). Matches how
+        # /cuaca and /prakiraan pick their slots.
+        nearest = _find_nearest_entry(
+            entries_sorted, datetime.now().hour
+        )
+        current_dt = nearest.get('local_datetime', '') if nearest else ''
+        for entry in entries_sorted:
             local_dt = entry.get('local_datetime', '')
             hour = local_dt.split(' ')[1][:5] if ' ' in local_dt else '—'
             weather_code = str(entry.get('weather', ''))
             emoji = WEATHER_EMOJI.get(weather_code, '❓')
             temp = entry.get('t', '?')
             hu = entry.get('hu', '?')
-            marker = " 📍" if local_dt.startswith(current_prefix) else ""
+            # Not 📍 — the header already uses that for the location.
+            marker = " ← sekarang" if local_dt == current_dt else ""
             output.append(f"{emoji} <code>{hour}</code>  {entry.get('weather_desc', '')}  {temp}°C  💧{hu}%{marker}")
 
         output.append("\n<i>📡 Sumber: BMKG</i>")

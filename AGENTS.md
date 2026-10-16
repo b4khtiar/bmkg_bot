@@ -16,7 +16,7 @@ podman-compose build && podman-compose up -d
 
 - **Required env vars** (`.env`): `BOT_TOKEN`, `ADMIN_CHAT_ID`
 - **Optional env vars**: `UNSPLASH_ACCESS_KEY` (weather photos — bot runs without it, text-only), `LOG_LEVEL`, `HEALTH_SERVER_PORT`, `BMKG_FAILURES_ALERT_THRESHOLD`, `BROADCAST_FAILURE_RATE`, `DB_TIMEOUT_ALERT_SECONDS`
-- **Timezone**: defaults to `Asia/Jakarta` (Dockerfile hardcodes `TZ=Asia/Jakarta`; docker-compose overrides via `- TZ=Asia/Jakarta`). `ADMIN_CHAT_ID` is used in `src/main.py` and `handlers/admin.py` — mismatch breaks admin commands.
+- **Timezone**: defaults to `Asia/Jakarta` (Dockerfile sets `ENV TZ=Asia/Jakarta`; docker-compose also passes `- TZ=Asia/Jakarta`). `ADMIN_CHAT_ID` is used in `src/main.py` and `handlers/admin.py` — mismatch breaks admin commands. **Do not compare `datetime.now()` against BMKG `local_datetime`** — the server clock is WIB-equivalent only when `TZ` is set, and `python src/main.py` on a bare host may not be. Derive dates from BMKG's own payload instead (see `parse_weather_hourly_today`).
 - **Database**: SQLite at `data/bot_data.db` (gitignored). Connection is a process-wide singleton in `src/database.py` (`_db_connection`); opened with WAL mode + 5s busy timeout. Initialized via `init_db()` on startup.
 - **Docker note**: Dockerfile copies `src/` into `/app/src/`, but DB path is relative (`data/bot_data.db`). docker-compose mounts `./data:/app/data:z` to persist. If you run `python src/main.py` locally, DB is created at `data/bot_data.db` in the working directory.
 
