@@ -242,9 +242,27 @@ async def daily_weather_job(bot, time_label):
     results = await asyncio.gather(*tasks) if tasks else []
     success = sum(1 for r in results if r)
     failed = len(results) - success
-    no_data = sum(1 for u in users if not weather_cache.get(u['adm_code']))
+    # Only users who set a location count as a BMKG data failure. Users without
+    # adm_code get the "set location first" notice above, and counting them
+    # would page the admin about a config gap, not an outage.
+    data_users = [u for u in users if u['adm_code']]
+    no_data = sum(1 for u in data_users if not weather_cache.get(u['adm_code']))
 
     logger.info(f"Broadcast cuaca ({time_label}) selesai: {success} berhasil, {failed} gagal, {no_data} tanpa data")
+
+    # Threshold-gated like check_quake_job/nowcast_alert_job: one cold-cache
+    # miss must not page the admin.
+    if no_data > 0:
+        if record_bmkg_failure("weather"):
+            await send_admin_alert(
+                bot,
+                f"BMKG cuaca gagal berulang (3x). {no_data}/{len(data_users)} pengguna dengan "
+                f"lokasi tidak dapat data. Cache mungkin kadaluarsa atau circuit breaker terbuka.",
+                severity="WARNING"
+            )
+    else:
+        record_bmkg_success("weather")
+
     if failed > 0 and ADMIN_ID:
         if check_broadcast_failure_rate(success, len(results)):
             await send_admin_alert(
@@ -277,88 +295,97 @@ async def nowcast_alert_job(bot):
 
     record_bmkg_success("nowcast")
 
-    users = await get_users_with_pref("notify_nowcast")
-    session_ts = int(time.time())
-    processed_alerts = {}
+    try:
+        users = await get_users_with_pref("notify_nowcast")
+        session_ts = int(time.time())
+        processed_alerts = {}
 
-    tasks = []
-    for user_row in users:
-        adm_code = user_row['adm_code']
-        if not adm_code:
-            continue
-
-        province_name = get_province_name(adm_code)
-        if not province_name:
-            continue
-
-        links = parse_nowcast_rss(rss_data, province_name)
-
-        for link in links:
-            if link not in processed_alerts:
-                detail_xml = await fetch_alert_detail(link)
-                if detail_xml:
-                    processed_alerts[link] = parse_cap_detail(detail_xml)
-
-            alert = processed_alerts.get(link)
-            if not alert:
+        tasks = []
+        for user_row in users:
+            adm_code = user_row['adm_code']
+            if not adm_code:
                 continue
 
-            alert_province = alert.get('province', '')
-            if province_name.lower() not in alert_province.lower():
+            province_name = get_province_name(adm_code)
+            if not province_name:
                 continue
 
-            is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
-            if not is_new:
-                continue
+            links = parse_nowcast_rss(rss_data, province_name)
 
-            unique_img = f"{alert['image']}?t={session_ts}" if alert.get('image') else None
+            for link in links:
+                if link not in processed_alerts:
+                    detail_xml = await fetch_alert_detail(link)
+                    if detail_xml:
+                        processed_alerts[link] = parse_cap_detail(detail_xml)
 
-            sub_list = alert.get('sub_districts', '').split(", ")
-            short_sub = ", ".join(sub_list[:5]) + "..." if len(sub_list) > 5 else alert.get('sub_districts', '')
+                alert = processed_alerts.get(link)
+                if not alert:
+                    continue
 
-            impact_bullets = "\n".join([f"• {i.strip()}" for i in alert.get('impacts', [])])
-            advice_bullets = "\n".join([f"• {a.strip()}" for a in alert.get('advice', [])])
+                alert_province = alert.get('province', '')
+                if province_name.lower() not in alert_province.lower():
+                    continue
 
-            msg = (
-                "🚨 <b>PERINGATAN DINI CUACA</b>\n"
-                "━━━━━━━━━━━━━━\n"
-                f"<b>Status:</b> {alert.get('severity', 'N/A')}\n"
-                f"<b>Waktu:</b> {alert.get('effective', '?')} - {alert.get('expires', '?')}\n"
-                f"<b>Cakupan:</b> {alert.get('province', 'N/A')}\n\n"
-                f"<b>Peringatan:</b>\n{alert.get('event', 'N/A')}\n\n"
-                f"<b>Potensi Dampak:</b>\n{impact_bullets}\n\n"
-                f"<b>Saran Keselamatan:</b>\n{advice_bullets}\n\n"
-                f"<b>Wilayah Terdampak:</b>\n{short_sub}\n\n"
-                f"<i>Sumber: BMKG</i>\n"
-                "━━━━━━━━━━━━━━\n"
-            )
+                is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
+                if not is_new:
+                    continue
 
-            if unique_img:
-                tasks.append(_send_photo_sem(bot, user_row['chat_id'], unique_img, msg))
+                unique_img = f"{alert['image']}?t={session_ts}" if alert.get('image') else None
+
+                sub_list = alert.get('sub_districts', '').split(", ")
+                short_sub = ", ".join(sub_list[:5]) + "..." if len(sub_list) > 5 else alert.get('sub_districts', '')
+
+                impact_bullets = "\n".join([f"• {i.strip()}" for i in alert.get('impacts', [])])
+                advice_bullets = "\n".join([f"• {a.strip()}" for a in alert.get('advice', [])])
+
+                msg = (
+                    "🚨 <b>PERINGATAN DINI CUACA</b>\n"
+                    "━━━━━━━━━━━━━━\n"
+                    f"<b>Status:</b> {alert.get('severity', 'N/A')}\n"
+                    f"<b>Waktu:</b> {alert.get('effective', '?')} - {alert.get('expires', '?')}\n"
+                    f"<b>Cakupan:</b> {alert.get('province', 'N/A')}\n\n"
+                    f"<b>Peringatan:</b>\n{alert.get('event', 'N/A')}\n\n"
+                    f"<b>Potensi Dampak:</b>\n{impact_bullets}\n\n"
+                    f"<b>Saran Keselamatan:</b>\n{advice_bullets}\n\n"
+                    f"<b>Wilayah Terdampak:</b>\n{short_sub}\n\n"
+                    f"<i>Sumber: BMKG</i>\n"
+                    "━━━━━━━━━━━━━━\n"
+                )
+
+                if unique_img:
+                    tasks.append(_send_photo_sem(bot, user_row['chat_id'], unique_img, msg))
+                else:
+                    tasks.append(_send_msg_sem(bot, user_row['chat_id'], msg))
+
+        results = await asyncio.gather(*tasks) if tasks else []
+        success = sum(1 for r in results if r)
+        failed = len(results) - success
+
+        logger.info(f"Broadcast nowcast selesai: {success} berhasil, {failed} gagal")
+        if failed > 0 and ADMIN_ID:
+            if check_broadcast_failure_rate(success, len(results)):
+                await send_admin_alert(
+                    bot,
+                    f"⚠️ Broadcast nowcast failure rate tinggi: {failed}/{len(results)} gagal.",
+                    severity="WARNING"
+                )
             else:
-                tasks.append(_send_msg_sem(bot, user_row['chat_id'], msg))
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 <b>Ringkasan Broadcast Nowcast</b>\n"
+                    f"✅ Terkirim: {success}\n"
+                    f"❌ Gagal: {failed}",
+                    parse_mode="HTML"
+                )
 
-    results = await asyncio.gather(*tasks) if tasks else []
-    success = sum(1 for r in results if r)
-    failed = len(results) - success
-
-    logger.info(f"Broadcast nowcast selesai: {success} berhasil, {failed} gagal")
-    if failed > 0 and ADMIN_ID:
-        if check_broadcast_failure_rate(success, len(results)):
+    except Exception as e:
+        logger.error(f"nowcast_alert_job error: {e}", exc_info=True)
+        if ADMIN_ID:
             await send_admin_alert(
                 bot,
-                f"⚠️ Broadcast nowcast failure rate tinggi: {failed}/{len(results)} gagal.",
+                f"⚠️ nowcast_alert_job error: {type(e).__name__}: {e}. Beberapa peringatan mungkin tidak terkirim.",
                 severity="WARNING"
             )
-        else:
-            await bot.send_message(
-                ADMIN_ID,
-                f"🚨 <b>Ringkasan Broadcast Nowcast</b>\n"
-                f"✅ Terkirim: {success}\n"
-                f"❌ Gagal: {failed}",
-                parse_mode="HTML"
-            )
-
 
 async def _db_health_check():
     """Async DB health check — used by health server thread via asyncio.run()."""
