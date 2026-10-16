@@ -113,6 +113,10 @@ async def cmd_extended_forecast(message: types.Message):
         try:
             await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
         except Exception:
+            logger.warning(
+                "Gagal kirim foto cuaca, fallback ke teks",
+                exc_info=True, extra={"chat_id": message.chat.id}
+            )
             await message.answer(text, parse_mode="HTML")
     else:
         await message.answer(text, parse_mode="HTML")
@@ -130,12 +134,23 @@ async def cmd_hourly_today(message: types.Message):
     result = await parse_weather_hourly_today(raw_data)
     text = result.get("text")
     photo_url = result.get("photo_url")
-    if photo_url:
+    # Telegram rejects captions over 1024 chars, which would land in the
+    # photo-send exception path and mask the real cause. Skip photo instead.
+    if photo_url and len(text) <= 1024:
         try:
             await message.answer_photo(photo=photo_url, caption=text, parse_mode="HTML")
         except Exception:
+            logger.warning(
+                "Gagal kirim foto cuaca per jam, fallback ke teks",
+                exc_info=True, extra={"chat_id": message.chat.id}
+            )
             await message.answer(text, parse_mode="HTML")
     else:
+        if photo_url:
+            logger.info(
+                f"Foto dilewati: caption {len(text)} karakter melebihi batas 1024",
+                extra={"chat_id": message.chat.id}
+            )
         await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("gempa"))

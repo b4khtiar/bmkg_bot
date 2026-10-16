@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 import defusedxml.ElementTree as ET
-from utils.constants import WEATHER_CODES, WEATHER_EMOJI
+from utils.constants import WEATHER_CODES, WEATHER_EMOJI, _RAIN_CODES
 from utils.insight_templates import generate_smart_insight, generate_trend_insight
 
 logger = logging.getLogger(__name__)
@@ -95,8 +95,8 @@ async def fetch_with_retry(url, retries=2, delay=1.5, text=False, json=False, pa
             logger.warning(f"HTTP {response.status_code} untuk {url} (percobaan {attempt+1}/{retries+1})")
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
             logger.warning(f"Gagal fetch {url}: {type(e).__name__}: {e} (percobaan {attempt+1}/{retries+1})")
-            if attempt < retries:
-                await asyncio.sleep(delay * (attempt + 1))
+        if attempt < retries:
+            await asyncio.sleep(delay * (attempt + 1))
     return None
 
 def _flatten_today_entries(json_response):
@@ -333,9 +333,14 @@ def parse_nowcast_rss(xml_string, user_city_name=None):
     relevant_links = []
 
     for item in items:
-        description = item.find("description").text
-        title = item.find("title").text
-        link = item.find("link").text
+        desc_el = item.find("description")
+        title_el = item.find("title")
+        link_el = item.find("link")
+        description = desc_el.text if desc_el is not None else ""
+        title = title_el.text if title_el is not None else ""
+        link = link_el.text if link_el is not None else ""
+        if not link:
+            continue
         # Jika user_city_name = None, ambil semua link
         if user_city_name is None:
             relevant_links.append(link)
@@ -515,14 +520,16 @@ async def parse_weather_multi_day(json_response, days=3):
         day_label = day_names[day_idx] if day_idx < len(day_names) else f"Hari ke-{day_idx+1}"
         output.append(f"\n━━━ {day_label} ━━━")
 
-        temp_max = max(float(w.get('t', 0)) for w in entries if w.get('t') is not None)
-        temp_min = min(float(w.get('t', 0)) for w in entries if w.get('t') is not None)
-        has_rain = any(60 <= int(w.get('weather', 0)) <= 82 for w in entries)
-        avg_hu = sum(float(w.get('hu', 50)) for w in entries) / len(entries)
-        max_wind = max(float(w.get('ws', 0)) for w in entries)
+        # BMKG omits hu/ws/weather on some entries; `or` keeps a missing field
+        # from raising TypeError and killing the whole 3-day message.
+        temp_max = max(float(w.get('t') or 0) for w in entries)
+        temp_min = min(float(w.get('t') or 0) for w in entries)
+        has_rain = any(int(w.get('weather') or -1) in _RAIN_CODES for w in entries)
+        avg_hu = sum(float(w.get('hu') or 50) for w in entries) / len(entries)
+        max_wind = max(float(w.get('ws') or 0) for w in entries)
 
         rain_icon = "🌧️" if has_rain else "☀️"
-        output.append(f"{rain_icon} <code>{temp_min:.0f}–{temp_max:.0f}°C</code> 💧<code>{avg_hu:.0f}%</code> 💨<code>{max_wind:.0f}</code>")
+        output.append(f"{rain_icon} <code>{temp_min:.0f}–{temp_max:.0f}°C</code> 💧<code>{avg_hu:.0f}%</code> 💨<code>{max_wind:.0f} km/jam</code>")
 
         slot_parts = []
         for slot_hour, slot_label in ((8, "08.00"), (17, "17.00")):
@@ -562,7 +569,7 @@ async def fetch_weather_data(adm_code):
         return None
 
     try:
-        data = await fetch_with_retry(url, json=True, params=params)
+        data = await fetch_with_retry(url, json=True, params=params, retries=3, delay=2.0)
         if data:
             circuit.record_success()
             await _cache_weather(adm_code, data)

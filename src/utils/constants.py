@@ -103,6 +103,14 @@ IMAGE_WEATHER_GROUPS = {
     "thunderstorm": {95, 96, 97},
 }
 
+# Every code that counts as "wet". Derived so it can never drift from the
+# groups above — a hand-kept range once missed 95-97 and showed ☀️ on petir days.
+_RAIN_CODES = (
+    IMAGE_WEATHER_GROUPS["light_rain"]
+    | IMAGE_WEATHER_GROUPS["heavy_rain"]
+    | IMAGE_WEATHER_GROUPS["thunderstorm"]
+)
+
 # Per-code Unsplash search query. Codes sharing a group may use distinct
 # queries so the same broadcast never feels repetitive across conditions.
 WEATHER_QUERY_MAP = {
