@@ -261,7 +261,7 @@ def weather_daily_brief(slots: list, location: str, insight: str, trend: str) ->
     if insight:
         blocks.append((30, f"💡 <b>INSIGHT</b>\n{insight}"))
     if trend:
-        blocks.append((40, trend))
+        blocks.append((40, f"📈 <b>TREN BESOK</b>\n{trend}"))
 
     head = f"📅 <b>PRAKIRAAN CUACA HARI INI</b>\n📍 {location}"
     return head, blocks

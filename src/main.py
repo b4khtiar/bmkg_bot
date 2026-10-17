@@ -434,14 +434,13 @@ async def shutdown():
     logger.info("Koneksi database dan HTTP ditutup.")
 
 
-
 #: Menu perintah yang dilihat pengguna di Telegram.
 #:
 #: Hanya nama BARU yang dipublikasikan. Nama lama (`/cuaca_hari_ini`,
 #: `/atur_notif`) tetap diterima sebagai alias dengan satu pesan pemberitahuan,
 #: jadi muscle memory tidak hilang — tapi menu mengajari kosakata yang benar.
 #:
-#: Tanpa ini, menu perintah Telegram kosong: tidak ada yang memberi tahu
+#: Tanpa ini, menu perintah Telegram kosong: tidak ada yang(memberi tahu
 #: fitur apa saja yang ada.
 USER_COMMANDS = [
     ("cuaca", "Cuaca saat ini"),

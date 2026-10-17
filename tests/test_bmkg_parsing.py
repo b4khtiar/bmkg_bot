@@ -68,6 +68,41 @@ class TestWeatherParsers:
         payload["lokasi"] = {}
         result = asyncio.run(fn(payload))
         assert "—" in result["text"]
+
+
+class TestDailyBriefTrend:
+    """Plugin tren dipasang sejak lama, tapi tidak pernah tampil: pemanggil
+    memberi `generate_trend_insight` daftar `data` (grup lokasi) alih-alih
+    grup hari di dalamnya, sehingga 'hari besok' selalu kosong."""
+
+    def _brief(self, monkeypatch):
+        _with_unsplash_stubbed(monkeypatch)
+        return asyncio.run(parse_weather_daily_brief(deepcopy(WEATHER_JSON)))["text"]
+
+    def test_trend_renders_in_the_full_pipeline(self, monkeypatch):
+        text = self._brief(monkeypatch)
+        assert "📈 <b>TREN BESOK</b>" in text
+
+    def test_exactly_one_trend_header(self, monkeypatch):
+        text = self._brief(monkeypatch)
+        assert text.count("📈") == 1
+
+    def test_trend_content_mentions_tomorrow_max_temp(self, monkeypatch):
+        """Isi tren berasal dari data hari kedua — bukan placeholder."""
+        text = self._brief(monkeypatch)
+        assert re.search(r"TREN BESOK.*", text, re.S)
+        assert "Besok" in text.split("📈 <b>TREN BESOK</b>")[1]
+
+    def test_single_day_payload_has_no_trend_block(self, monkeypatch):
+        """Satu hari tidak punya 'besok' untuk dibandingkan — blok tidak
+        boleh muncul kosong atau placeholder."""
+        _with_unsplash_stubbed(monkeypatch)
+        payload = deepcopy(WEATHER_JSON)
+        payload["data"][0]["cuaca"] = payload["data"][0]["cuaca"][:1]
+        result = asyncio.run(parse_weather_daily_brief(payload))
+        assert "TREN" not in result["text"]
+
+
 class TestCacheBanner:
     def test_multiday_shows_cache_banner(self):
         """Bug yang diperbaiki: /prakiraan menyajikan data basi tanpa peringatan

@@ -189,15 +189,38 @@ class TestInsightUsesTable:
         ada apa-apa."""
         from utils.insight_templates import _select_pool
 
-        pool, _ = _select_pool(it.analyze_weather(self._entries(53, tp=1)))
+        pool = _select_pool(it.analyze_weather(self._entries(53, tp=1)))
         assert pool is it.DRIZZLE_TEMPLATES
 
     def test_thunderstorm_beats_drizzle(self):
         from utils.insight_templates import _select_pool
 
         entries = self._entries(53, tp=1) + self._entries(95, tp=20)
-        pool, _ = _select_pool(it.analyze_weather(entries))
+        pool = _select_pool(it.analyze_weather(entries))
         assert pool is it.THUNDERSTORM_TEMPLATES
+
+    def test_insight_has_no_bold_prefix_of_its_own(self):
+        """Dulu setiap insight membawa "<emoji> <b>Saran hari ini:</b>" sementara
+        pemanggil membungkusnya dengan header "💡 INSIGHT" — dua header bertumpuk.
+        Isi insight sekarang polos; header murni milik formatter."""
+        for code in (0, 3, 53, 63, 95):
+            insight = it.generate_smart_insight(self._entries(code, tp=10), max_insights=1)
+            assert "<b>" not in insight, f"kode {code}: {insight!r}"
+
+    def test_trend_has_no_header_of_its_own(self):
+        """ generate_trend_insight dulu mengembalikan "📈 <b>TREN BESOK</b>\\n..."
+        lengkap dengan header — semua generator isi, formatter yang memberi
+        judul."""
+        from fixtures.bmkg import WEATHER_JSON
+
+        cuaca_data = WEATHER_JSON["data"][0]["cuaca"]
+        trend = it.generate_trend_insight(cuaca_data)
+        assert trend, "fixture jelas punya dua hari berbeda"
+        assert "<b>" not in trend and "TREN" not in trend
+
+    def test_trend_empty_when_fewer_than_two_days(self):
+        assert it.generate_trend_insight([]) == ""
+        assert it.generate_trend_insight([[{"t": 30, "weather": 1}]]) == ""
 
     def test_hour_parsing_survives_malformed_timestamp(self):
         """Pola `local_dt.split(' ')[1]` yang disebut AGENTS.md."""

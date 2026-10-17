@@ -40,11 +40,15 @@ podman-compose build && podman-compose up -d
 | `src/database.py` | All SQLite access via `aiosqlite`, singleton connection, `weather_cache` & `pending_sends` tables |
 | `src/services/bmkg_api.py` | HTTP fetch (httpx, retry, URL allowlist, circuit breaker), BMKG JSON/XML parsing, cache fallback |
 | `src/services/unsplash_client.py` | Unsplash photo fetch by weather condition group; caches by group (memory + SQLite, 6h TTL) |
-| `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/cuaca_hari_ini`, `/gempa`, `/nowcast`, `/atur_notif`, `/ping` |
+| `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/per_jam` (alias `/cuaca_hari_ini`), `/gempa`, `/nowcast`, `/lokasi`, `/notifikasi` (alias `/atur_notif`), `/bantuan`, `/ping` |
 | `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` (validated) |
-| `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `WEATHER_CODES`, `WEATHER_EMOJI`, `_VALID_BOT_MODES` |
+| `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `_VALID_BOT_MODES` |
+| `src/utils/weather_table.py` | Single source of truth for BMKG weather codes (`WEATHER_CONDITIONS`) + derived sets |
 | `src/utils/keyboards.py` | Inline keyboard builders (with 64-byte callback_data assertions) |
 | `src/utils/insight_templates.py` | Smart weather insight text generation |
+| `src/utils/text.py` | HTML escaping, `fmt_temp`/`fmt_hum`/`fmt_wind`, `MISSING` (`—`) |
+| `src/utils/design.py` | `compose()` — caption budget, photo-credit rule, truncation order, `severity_note()` |
+| `src/utils/formatters.py` | Message formatting for quake, nowcast, and all four weather commands |
 | `src/logging_config.py` | Structured JSON logging with bot_mode context |
 | `src/alerts.py` | Admin alert throttling, BMKG failure tracking, broadcast failure rate monitoring |
 | `src/health_server.py` | Threaded stdlib HTTP `/healthz` + `/metrics` endpoints on port 8080 |
@@ -72,15 +76,22 @@ python src/main.py
 - **Adding a province**: add entry to `PROVINCE_MAP` (2-digit prefix) and optionally to `REGION_DATA` (for location picker).
 - **Adding a user command**: import in `src/handlers/user.py`, route via `@router.message(Command(...))`. No registration needed in `main.py` — it already `include_router(user.router)`.
 - **Adding an admin command**: same pattern in `src/handlers/admin.py`.
-- **No tests framework**: there are no tests in this repo. If you add one, match the existing Python 3.11 style (no `src/` package prefix).
+- **Tests**: `python -m pytest` (config in `pytest.ini`, `pythonpath = src tests`). No network calls. `tests/aiogram_stub.py` installs a stub aiogram only when the real package is missing (it pins `aiogram==3.28.2`, which the sandbox index could not serve) — enough to exercise handlers and broadcasts, not a Telegram simulation. Fixtures in `tests/fixtures/bmkg.py` are deliberately oversized.
 
 ## Gotchas
 
 - `data/bot_data.db` and `.env` are gitignored. Do not commit them.
 - `__pycache__/` is also gitignored.
 - The bot uses **long polling** (`dp.start_polling`) — no webhook endpoint. For production scaling, refactor to webhook mode in `main.py`.
+- **Health status has one home: `health_server.py`.** Callers *outside* an event loop (the threaded HTTP `/healthz`+`/metrics` server) use `get_health()`; aiogram handlers use `await get_health_async()`. The sync variant runs `asyncio.run()` internally, which raises inside the bot's own event loop — using it in a handler made `/ping` report "degraded" forever without ever checking anything. `/ping` and the admin panel both use the async variant.
 - `check_and_update_alert()` is used for CAP alert dedup (not just "check") — it writes `cap_<id>` to config table and returns True only if the value changed.
-- Weather parsing (`parse_weather_current`, `parse_weather_daily_brief`, `parse_weather_multi_day`) assumes BMKG JSON structure: `data[0].cuaca` is a list of time-group lists. If BMKG changes their API shape, these break.
+- Weather parsing (`parse_weather_current`, `parse_weather_daily_brief`, `parse_weather_multi_day`) assumes BMKG JSON structure: `data` has **one** element whose `cuaca` is a list of **day groups**, each a list of entries. If BMKG changes their API shape, these break.
+- **Every BMKG/CAP/RSS string must pass through `esc()`** (or `esc_href()` for link attributes). Messages use `parse_mode="HTML"`, and one unescaped `&` makes Telegram reject the whole message with `BadRequest: can't parse entities`. On the broadcast path that rejection is invisible in the admin summary: it counts Telegram call results, not deliveries, so alerts silently vanish after 3 retries.
+- **Never emit a message longer than 1024 chars as a photo caption.** Build user-facing messages with `compose()` from `utils/design.py` — it enforces the budget, drops the lowest-priority block first, and discloses the trim. Do not hand-roll caption strings; that is what let nowcast alerts get dropped.
+- **Insight and trend generators return plain content** (`utils/insight_templates.py`); the section headers (`💡 INSIGHT`, `📈 TREN BESOK`) belong to the formatter (`utils/formatters.py`). They once produced two stacked headers per block because the generator carried its own bold prefix that the consumer then had to regex-strip.
+- `📍` is reserved for **location only** (weather headers, `/gempa` origin). Use `🗺️` for region/scope and `🏠` for the user's own area.
+- **BMKG weather codes live only in `utils/weather_table.py`.** There is one `WEATHER_CONDITIONS` table keyed by code with `label`, `emoji`, `photo_group`, `insight_pool`, `sky`, and `wet`; every set (`WET_CODES`, `THUNDERSTORM_CODES`, `HAZE_CODES`, …) is derived from it. Never re-add a second code map — the previous four had already drifted apart, and `tests/test_weather_table.py` now fails on any code without a photo query, an unknown group, or two emoji for one label. `weather_table.log_problems()` runs once at startup for the same reason.
+- When choosing a predicate about conditions, pick deliberately: `is_wet(code)` is physical precipitation (so "Petir" 17–24 is False), while `is_wet_or_stormy(code)` also covers thunderstorms and is what the daily rain icon must use.
 
 ## Operational notes
 

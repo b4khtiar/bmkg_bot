@@ -193,5 +193,19 @@ class TestWeatherDailyBrief:
 
     def test_trend_section_optional(self):
         assert "TREN" not in self._render_brief([self._slot()], insight="x")
-        assert "TREN" in self._render_brief(
-            [self._slot()], trend="📈 <b>TREN BESOK</b>\nBesok lebih hangat.")
+        assert "TREN" in self._render_brief([self._slot()], insight="x", trend="Besok lebih hangat.")
+
+    def test_formatter_owns_the_trend_header(self):
+        """Dulu trend membawa header sendiri dari generator, sehingga kepemilikan
+        header terbagi dua tempat. Sekarang formatter menyediakannya."""
+        text = self._render_brief([self._slot()], trend="Besok lebih hangat.")
+        assert text.count("📈 <b>TREN BESOK</b>") == 1
+
+    def test_one_header_per_section(self):
+        """Insight dan tren masing-masing persis satu header — dulu insight
+        berpotensi punya dua ("💡 INSIGHT" + "💡 Saran hari ini:")."""
+        text = self._render_brief(
+            [self._slot()], insight="Hujan diperkirakan.", trend="Besok lebih adem."
+        )
+        assert text.count("💡 <b>INSIGHT</b>") == 1
+        assert text.count("Saran hari ini") == 0

@@ -95,15 +95,10 @@ def analyze_weather(weather_list):
         'rain_hours': rain_hours,
     }
 
-# Semua prefiks impersonal atau formal. Pool ini pernah mencampur "Insight
-# untuk Anda" dengan "Yang perlu kamu tahu", sehingga satu pesan yang sama bisa
-# terbaca formal atau santai tergantung undian — dan nada bot jadi tidak
-# konsisten antar-pengguna.
-PREFIXES = [
-    "Saran hari ini:", "Insight untuk Anda:", "Catatan penting:",
-    "Info kilat:", "Perhatian:", "Tips:", "Sekadar info:",
-    "Pengingat:", "Yang perlu Anda ketahui:", "Catatan dari BMKG:",
-]
+# Pool insigh tidak lagi memakai prefiks ("Saran hari ini:" dsb.). Dulu tiap
+# insight membawa prefiks tebal + emoji sendiri, padahal pemanggil membungkusnya
+# dengan header "💡 INSIGHT" — menghasilkan dua header bertumpuk dalam satu
+# pesan. Prefiks dihapus; header hanya boleh ada satu, dan itu milik pemanggil.
 THUNDERSTORM_TEMPLATES = [
     "Hujan petir diprediksi hari ini. Jaga jarak dari pepohonan tinggi dan benda metal. Matikan perangkat elektronik yang tidak perlu saat hujan mulai turun.",
     "Ada potensi hujan disertai petir. Hindari area terbuka dan genangan air. Jika di luar ruangan, cari tempat berteduh yang aman — bukan di bawah pohon atau menara.",
@@ -259,7 +254,7 @@ def pick_templates_until(pool, meta, max_total_chars=600):
 
 
 def _select_pool(meta):
-    """Pilih (pool template, emoji aksen) untuk kondisi hari ini.
+    """Pilih pool template untuk kondisi hari ini.
 
     Urutannya penting: petir mengalahkan hujan deras, hujan deras
     mengalahkan hujan biasa, dan gerimis — yang kode 50-57-nya sudah
@@ -267,11 +262,11 @@ def _select_pool(meta):
     dideskripsikan sebagai hujan biasa.
     """
     if meta['has_thunderstorm']:
-        return THUNDERSTORM_TEMPLATES, "⚡"
+        return THUNDERSTORM_TEMPLATES
     if meta['rain_heavy']:
-        return RAIN_HEAVY_TEMPLATES, "⛈️"
+        return RAIN_HEAVY_TEMPLATES
     if meta['has_drizzle']:
-        return DRIZZLE_TEMPLATES, "🌦️"
+        return DRIZZLE_TEMPLATES
     if meta['has_rain']:
         rush = any(15 <= h <= 18 for h in meta['rain_hours'])
         if rush:
@@ -282,29 +277,35 @@ def _select_pool(meta):
             pool = RAIN_AFTERNOON_TEMPLATES
         else:
             pool = RAIN_LIGHT_TEMPLATES
-        return pool, "🌧️"
+        return pool
     if meta['max_temp'] >= 34:
-        return HEAT_TEMPLATES, "☀️"
+        return HEAT_TEMPLATES
     if meta['is_clear']:
         # Codes 3 and 4 are "Berawan"/"Berawan Tebal" and are no longer part of
         # the clear set, so an overcast day can no longer be described as
         # "Hari cerah sempurna! Cocok untuk jemur pakaian".
-        return CLEAR_TEMPLATES, "☀️"
+        return CLEAR_TEMPLATES
     if meta['is_cloudy']:
-        return CLOUDY_TEMPLATES, "☁️"
-    return DEFAULT_TEMPLATES, "ℹ️"
+        return CLOUDY_TEMPLATES
+    return DEFAULT_TEMPLATES
 
 
 def generate_smart_insight(weather_list, max_insights=None):
+    """Isi insight tanpa header/prefiks — header disediakan pemanggil.
+
+    Dulu fungsi ini mengembalikan "<emoji> <b>Prefiks:</b> isi", lalu
+    ``parse_weather_daily_brief`` mengupasnya lagi dengan regex supaya tidak
+    bertumpuk dengan header "💡 INSIGHT". Sekarang sumber dan konsumen tidak
+    lagi sama-sama mengetahui format prefiks tersebut.
+    """
     meta = analyze_weather(weather_list)
     if not meta:
         return "Tidak ada data cuaca tersedia."
 
-    pref = random.choice(PREFIXES)
     lines = []
     is_short = max_insights == 1
 
-    pool, emoji = _select_pool(meta)
+    pool = _select_pool(meta)
     if is_short:
         lines.append(random.choice(pool).format(**meta))
     else:
@@ -333,10 +334,15 @@ def generate_smart_insight(weather_list, max_insights=None):
             lines = lines[:2]
 
     separator = "\n"
-    return f"{emoji} <b>{pref}</b> {separator.join(lines)}"
+    return separator.join(lines)
 
 
 def generate_trend_insight(cuaca_data):
+    """Isi tren tanpa header — "📈 TREN BESOK" disediakan pemanggil.
+
+    Sama seperti ``generate_smart_insight``: satu blok hanya boleh punya satu
+    header, dan itu milik formatter, bukan generator.
+    """
     if len(cuaca_data) < 2:
         return ""
 
@@ -349,11 +355,7 @@ def generate_trend_insight(cuaca_data):
     today_max = max(float(w.get('t', 0)) for w in today_entries)
     tomorrow_max = max(float(w.get('t', 0)) for w in tomorrow_entries)
 
-    today_min = min(float(w.get('t', 0)) for w in today_entries)
-    tomorrow_min = min(float(w.get('t', 0)) for w in tomorrow_entries)
-
     diff_max = tomorrow_max - today_max
-    diff_min = tomorrow_min - today_min
 
     tomorrow_has_rain = any(60 <= int(w.get('weather', 0)) <= 82 for w in tomorrow_entries)
     today_has_rain = any(60 <= int(w.get('weather', 0)) <= 82 for w in today_entries)
@@ -371,5 +373,4 @@ def generate_trend_insight(cuaca_data):
     elif not tomorrow_has_rain and today_has_rain:
         parts.append("Kabar baik: besok diprediksi tidak hujan, dibanding hari ini.")
 
-    trend_insight = " ".join(parts)
-    return f"📈 <b>TREN BESOK</b>\n{trend_insight}"
+    return " ".join(parts)

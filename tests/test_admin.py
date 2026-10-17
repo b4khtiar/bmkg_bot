@@ -72,12 +72,6 @@ def sent():
 
 
 class TestPanel:
-    def test_panel_shows_user_count_and_mode(self, db, admin, sent):
-        out, Recorder = sent
-        asyncio.run(A.cmd_admin_panel(Recorder("/admin")))
-        text = out[0][0]
-        assert "3" in text and "OPEN" in text
-
     @pytest.fixture
     def health(self, monkeypatch):
         """Kendalikan status yang ditampilkan panel."""
@@ -91,6 +85,12 @@ class TestPanel:
         monkeypatch.setattr(health_server, "_db_check_fn", db_check)
         monkeypatch.setattr(health_server, "_bmkg_check_fn", lambda: state["bmkg"])
         return state
+
+    def test_panel_shows_user_count_and_mode(self, db, admin, sent):
+        out, Recorder = sent
+        asyncio.run(A.cmd_admin_panel(Recorder("/admin")))
+        text = out[0][0]
+        assert "3" in text and "OPEN" in text
 
     def test_panel_shows_healthy_system(self, db, admin, sent, health):
         out, Recorder = sent
@@ -120,6 +120,20 @@ class TestPanel:
         text = out[0][0]
         assert "Panel Admin" in text, "panel tidak boleh gagal karena health check"
         assert "tidak dapat dibaca" in text
+
+    def test_non_admin_is_told_not_ignored(self, db, monkeypatch, sent):
+        """Dulu handler ini `return` tanpa balasan, sehingga bot tampak mengabaikan
+        perintah, sementara callback-nya menjawab 'Akses ditolak'."""
+        monkeypatch.setattr(A, "ADMIN_ID", 1)
+        out, Recorder = sent
+
+        class Other(Recorder):
+            def __init__(self, text=None):
+                super().__init__(text)
+                self.from_user = type("U", (), {"id": 2})()
+
+        asyncio.run(A.cmd_admin_panel(Other("/admin")))
+        assert "ditolak" in out[0][0].lower()
 
     def test_mode_change_refreshes_panel_in_place(self, db, admin, monkeypatch, sent):
         """Dulu panel diganti dua baris 'Status Diubah ke', sehingga jumlah

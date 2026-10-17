@@ -25,11 +25,17 @@ Bot Telegram untuk memantau data cuaca, gempa bumi, dan peringatan dini cuaca (n
 | `/start` | Registrasi awal & atur lokasi |
 | `/cuaca` | Cuaca saat ini (jam terdekat) |
 | `/prakiraan` | Prakiraan cuaca 3 hari ke depan (ringkasan + 08.00 & 17.00) |
-| `/cuaca_hari_ini` | Cuaca per jam untuk hari ini |
+| `/per_jam` | Cuaca per jam untuk hari ini |
 | `/gempa` | Informasi gempa bumi terkini |
 | `/nowcast` | Peringatan dini cuaca (filter provinsi) |
-| `/atur_notif` | Atur jenis notifikasi yang diterima |
+| `/lokasi` | Atur atau ubah lokasi |
+| `/notifikasi` | Atur jenis notifikasi yang diterima |
+| `/bantuan` | Daftar perintah |
 | `/ping` | Cek status bot |
+
+Nama lama `/cuaca_hari_ini` dan `/atur_notif` **masih diterima** sebagai alias,
+dengan satu pesan pemberitahuan nama barunya. Menu perintah Telegram hanya
+menampilkan nama baru.
 
 ### Admin
 
@@ -64,13 +70,32 @@ bmkg-bot/
 │   ├── services/
 │   │   └── bmkg_api.py         # Fetcher & parser data BMKG API
 │   └── utils/
-│       ├── constants.py        # WEATHER_CODES, PROVINCE_MAP, REGION_DATA
+│       ├── constants.py        # PROVINCE_MAP, REGION_DATA, mode bot
+│       ├── weather_table.py    # Tabel kode cuaca BMKG (satu sumber kebenaran)
 │       ├── keyboards.py        # Inline keyboard builder
+│       ├── text.py             # Escaping & format nilai
+│       ├── design.py           # Perakitan pesan & batas panjang
+│       ├── formatters.py       # Format pesan gempa & nowcast
 │       └── insight_templates.py# 50+ template insight cuaca
+├── tests/                      # Tes (pytest, tanpa jaringan)
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env                        # Token & konfigurasi (tidak di-commit)
 ```
+
+### Lapisan presentasi
+
+| File | Tanggung jawab |
+|------|----------------|
+| `utils/text.py` | Escaping HTML, format angka (`fmt_temp`/`fmt_hum`/`fmt_wind`), daftar bullet, `MISSING` (`—`) |
+| `utils/design.py` | `compose()` — satu budgetsatu caption, aturan kredit foto, urutan pemangkasan pesan |
+| `utils/formatters.py` | Format pesan gempa & peringatan dini cuaca (dipakai bersama oleh command dan broadcast) |
+
+Semua data dari BMKG diperlakukan sebagai input tidak dipercaya dan wajib
+melewati `esc()`. `compose()` menjamin pesan tidak pernah
+melebihi 1024 karakter caption: bagian yang paling boleh hilang dipangkas lebih
+dulu, lalu pengguna diberi tahu, alih-alih pesan ditolak Telegram dan hilang
+diam-diam.
 
 ## Instalasi & Deploy
 
@@ -106,6 +131,22 @@ podman-compose up -d
 pip install -r requirements.txt
 python src/main.py
 ```
+
+## Pengembangan
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest
+```
+
+Tes tidak memanggil jaringan. Fixture payload BMKG yang dipangkas ada di
+`tests/fixtures/bmkg.py`, dan sengaja dibuat berlebihan (bullet dampak dan saran
+banyak, `Dirasakan` panjang, karakter HTML di tiap field) karena payload
+"bersih" tidak akan menangkap bug panjang-kapitan maupun escaping.
+
+`tests/aiogram_stub.py` memasang tiruan aiogram hanya bila paket aslinya tidak
+terpasang — cukup untuk menguji perilaku handler dan broadcast, bukan untuk
+menyimulasikan Telegram.
 
 ## Database
 

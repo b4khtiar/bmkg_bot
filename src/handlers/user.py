@@ -5,7 +5,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from database import (
     add_user, get_bot_mode, is_user_whitelisted, update_user_location,
-    get_user_info, get_user_prefs, update_user_pref, get_db
+    get_user_info, get_user_prefs, update_user_pref
 )
 from utils.keyboards import (
     get_province_keyboard, get_city_keyboard, get_start_keyboard,
@@ -19,6 +19,7 @@ from services.bmkg_api import (
 from utils.constants import get_province_name
 from utils.formatters import format_quake, quake_shakemap_url
 from utils.text import esc
+from utils.design import CAPTION_LIMIT as _CAPTION_LIMIT  # diimpor dengan nama lama karena tes merujuk U._CAPTION_LIMIT
 import os, time, logging
 
 router = Router()
@@ -26,10 +27,9 @@ ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 logger = logging.getLogger(__name__)
 
 _bot_start_time = time.time()
-
-# Telegram rejects photo captions over 1024 chars. Going over would raise
-# inside answer_photo and land in the fallback path, masking the real cause.
-_CAPTION_LIMIT = 1024
+# `_CAPTION_LIMIT` di atas adalah CAPTION_LIMIT dari utils/design.py — angka
+# 1024 tidak lagi diketik ulang di sini; angka panjang caption hanya boleh
+# punya satu definisi.
 
 
 async def _reply_weather(message: types.Message, text: str, photo_url):
@@ -423,7 +423,6 @@ async def cmd_location(message: types.Message):
         parse_mode="HTML",
         reply_markup=get_province_keyboard()
     )
-
 
 @router.callback_query(F.data.startswith("provpage_"))
 async def handle_province_page(callback: types.CallbackQuery):

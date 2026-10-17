@@ -217,12 +217,16 @@ async def parse_weather_daily_brief(json_response):
                 slots.append((label, entry, wt.emoji(entry.get("weather"))))
 
         tips = generate_smart_insight(all_entries, max_insights=1)
-        cuaca_data = json_response.get("data", [])
-        trend = generate_trend_insight(cuaca_data) if cuaca_data else None
-        # The insight already carries its own emoji + bold prefix. Nesting it
-        # under another "💡 INSIGHT" header produced three stacked headers in
-        # one message, so the section header is dropped here instead.
-        insight = re.sub(r"^(\S+)\s*<b>[^<]*</b>\s*", "", tips).strip()
+        # `data` is a list of location groups; `generate_trend_insight` wants
+        # the day groups *inside* one location. Passing `data` itself made
+        # `tomorrow_entries` empty every time, so "📈 TREN BESOK" was silently
+        # absent from every daily brief ever sent.
+        data = json_response.get("data", [])
+        cuaca_days = data[0].get("cuaca", []) if data else []
+        trend = generate_trend_insight(cuaca_days)
+        # Both generators return plain content now; the section headers
+        # ("💡 INSIGHT", "📈 TREN BESOK") are owned by the formatter.
+        insight = tips
 
         head, blocks = weather_daily_brief(
             slots, location_label(json_response), insight, trend
@@ -336,19 +340,21 @@ def parse_nowcast_rss(xml_string, user_city_name=None):
             
     return relevant_links
 
-_RE_START_TIME = re.compile(r"akan terjadi pada (.*?) di sebagian")
 _RE_REGION = re.compile(r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi")
 _RE_IMPACT = re.compile(r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat")
 _RE_ADVICE = re.compile(r"dihimbau untuk (.*?)\. Kondisi diperkirakan")
-_RE_END_TIME = re.compile(r"berlangsung hingga (.*?)\.?$")
 _RE_SPLIT = re.compile(r',| dan | serta ')
 
 def parse_cap_description(text):
+    """Ambil wilayah, dampak, dan himbauan dari teks CAP.
+
+    Waktu mulai/berakhir dulu ikut di-scrape dari kalimat ("akan terjadi
+    pada...", "berlangsung hingga...") padahal CAP XML sudah menyediakannya
+    di tag ``effective``/``expires`` — dan tidak ada pihak yang membaca
+    kedua kunci tersebut, jadi scraping dan regex-nya dihapus saja.
+    """
     logging.info(f"Parsing CAP description: {text}")
     text = re.sub(r'\s+', ' ', text).strip()
-
-    start_time_match = _RE_START_TIME.search(text)
-    start_time = start_time_match.group(1).strip() if start_time_match else "Tidak diketahui"
 
     region_match = _RE_REGION.search(text)
     province = ""
@@ -367,12 +373,7 @@ def parse_cap_description(text):
     if advice_match:
         advice = [a.strip() for a in _RE_SPLIT.split(advice_match.group(1)) if a.strip()]
 
-    end_time_match = _RE_END_TIME.search(text)
-    end_time = end_time_match.group(1).strip() if end_time_match else "Tidak diketahui"
-
     return {
-        "start_time": start_time,
-        "end_time": end_time,
         "province": province,
         "sub_districts": sub_districts_raw,
         "impacts": impacts,
