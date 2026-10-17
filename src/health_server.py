@@ -21,7 +21,8 @@ _started_at = None
 _server: HTTPServer = None
 _thread: threading.Thread = None
 
-# Use a closure to access the DB check function (avoids circular import)
+# Use a closure to access the check functions (avoids circular import).
+# Kontrak: kedua checker harus async — lihat _gather().
 _db_check_fn = None
 _bmkg_check_fn = None
 
@@ -33,21 +34,6 @@ def _set_checkers(db_fn, bmkg_fn):
     _bmkg_check_fn = bmkg_fn
 
 
-#: Status kesehatan dihitung di satu tempat saja. Ada DUA pemanggil dengan
-#: konteks berbeda: thread server HTTP (tidak punya event loop) dan handler
-#: aiogram (sudah di dalam event loop). `get_health()` memakai asyncio.run(),
-#: yang hanya aman di thread; `get_health_async()` menunggu langsung. Memakai
-#: yang salah akan selalu melempar "cannot be called from a running event loop".
-
-
-def _check_bmkg_sync() -> bool:
-    try:
-        return bool(_bmkg_check_fn()) if _bmkg_check_fn else False
-    except Exception as e:
-        logger.warning(f"BMKG healthcheck error: {e}")
-        return False
-
-
 def _assemble(db_ok: bool, bmkg_ok: bool) -> dict:
     return {
         "status": "ok" if (db_ok and bmkg_ok) else "degraded",
@@ -57,28 +43,14 @@ def _assemble(db_ok: bool, bmkg_ok: bool) -> dict:
     }
 
 
-def get_health() -> dict:
-    """Status kesehatan — untuk pemanggil di luar event loop (server HTTP).
+async def _gather() -> dict:
+    """Jalankan kedua checker awaitable dan rangkai hasilnya.
 
-    Server kesehatan berjalan di thread terpisah, jadi `asyncio.run()` aman
-    di sini.
-    """
-    db_ok = False
-    if _db_check_fn:
-        try:
-            db_ok = asyncio.run(_db_check_fn())
-        except Exception as e:
-            logger.warning(f"DB healthcheck error: {e}")
-    return _assemble(db_ok, _check_bmkg_sync())
-
-
-async def get_health_async() -> dict:
-    """Status kesehatan — untuk pemanggil yang sudah di dalam event loop.
-
-    WAJIB dipakai oleh handler aiogram. Versi sinkron memanggil
-    `asyncio.run()`, yang melempar "cannot be called from a running event loop"
-    tepat di dalam loop bot — artinya `/ping` akan selalu melaporkan "degraded"
-    dan根本就没有 pernah memeriksa apa pun.
+    Checker HARUS awaitable. Dulu checker BMKG dipanggil sinkron:
+    ``bool(_bmkg_check_fn())`` pada fungsi async akan mengembalikan True untuk
+    coroutine yang belum dijalankan — kegagalan cek dilaporkan sehat. Satu
+    jalur await untuk kedua pemanggil menghapus jebakan itu sekaligus mencegah
+    pemanggilan blocking di dalam event loop bot.
     """
     db_ok = False
     if _db_check_fn:
@@ -86,7 +58,33 @@ async def get_health_async() -> dict:
             db_ok = bool(await _db_check_fn())
         except Exception as e:
             logger.warning(f"DB healthcheck error: {e}")
-    return _assemble(db_ok, _check_bmkg_sync())
+    bmkg_ok = False
+    if _bmkg_check_fn:
+        try:
+            bmkg_ok = bool(await _bmkg_check_fn())
+        except Exception as e:
+            logger.warning(f"BMKG healthcheck error: {e}")
+    return _assemble(db_ok, bmkg_ok)
+
+
+def get_health() -> dict:
+    """Status kesehatan — untuk pemanggil di luar event loop (server HTTP).
+
+    Server kesehatan berjalan di thread terpisah, jadi `asyncio.run()` aman
+    di sini.
+    """
+    return asyncio.run(_gather())
+
+
+async def get_health_async() -> dict:
+    """Status kesehatan — untuk pemanggil yang sudah di dalam event loop.
+
+    WAJIB dipakai oleh handler aiogram. Versi sinkron memanggil
+    `asyncio.run()`, yang melempar "cannot be called from a running event loop"
+    tepat di dalam loop bot — artinya `/ping` akan melaporkan "degraded"
+    tanpa pernah benar-benar memeriksa apa pun.
+    """
+    return await _gather()
 
 
 class _HealthHandler(BaseHTTPRequestHandler):

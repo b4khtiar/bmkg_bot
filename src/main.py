@@ -12,6 +12,7 @@ from services.bmkg_api import (
     fetch_latest_quake, fetch_weather_data, fetch_nowcast_alerts,
     parse_nowcast_rss, fetch_alert_detail, parse_cap_detail,
     parse_weather_daily_brief, parse_weather_current, close_http_client,
+    get_http_client,
 )
 from database import (
     init_db, get_metadata, update_metadata, check_and_update_alert,
@@ -404,14 +405,53 @@ async def _db_health_check():
         return False
 
 
-def _bmkg_health_check():
-    """Sync BMKG health check — lightweight HEAD request."""
+#: Probe kesehatan memakai endpoint yang benar-benar dikonsumsi bot (gempa +
+#: cuaca), bukan domain root. Dulu checker mem-HEAD ``https://api.bmkg.go.id``
+#: yang selalu balik 404 — /ping pun selalu bilang "BMKG tidak dapat dihubungi"
+#: padahal /cuaca dan /gempa mengalir normal.
+_BMKG_PROBE_URLS = (
+    "https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json",
+    "https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=34.01.09.2001",
+)
+_BMKG_PROBE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+#: Hasil probe dip-cache dengan TTL: /healthz bisa di-scrape tiap beberapa
+#: detik oleh Prometheus, dan tanpa cache itu berarti dua HTTP request ke BMKG
+#: per scrape — cara tercepat dikunci firewall.
+_BMKG_HEALTH_TTL_SECONDS = 120.0
+_bmkg_health_cache = {"ok": False, "at": float("-inf")}
+
+
+async def _bmkg_health_check():
+    """Cek BMKG yang dipakai /healthz, /metrics, /ping, dan panel admin.
+
+    Async (dipanggil via ``get_health_async`` di dalam event loop bot dan via
+    ``asyncio.run`` di thread server HTTP) supaya tidak memblokir loop — dulu
+    versi sync-nya membekukan loop hingga 5 detik tiap /ping. Ini juga kontrak
+    yang dinyatakan ``health_server._set_checkers``: checker terdaftar harus
+    awaitable; checker sync tidak di-await berarti hasilnya adalah coroutine
+    yang selalu truthy — kegagalan dilaporkan sehat.
+    """
+    now = time.monotonic()
+    if now - _bmkg_health_cache["at"] < _BMKG_HEALTH_TTL_SECONDS:
+        return _bmkg_health_cache["ok"]
+
+    ok = True
     try:
-        with httpx.Client(timeout=5.0) as client:
-            resp = client.head("https://api.bmkg.go.id", follow_redirects=True)
-            return resp.status_code == 200
-    except Exception:
-        return False
+        client = await get_http_client()
+        for url in _BMKG_PROBE_URLS:
+            resp = await client.head(url, timeout=_BMKG_PROBE_TIMEOUT)
+            if resp.status_code != 200:
+                logger.warning(
+                    f"BMKG healthcheck: {url} balik HTTP {resp.status_code}")
+                ok = False
+                break
+    except Exception as e:
+        logger.warning(f"BMKG healthcheck gagal: {e}")
+        ok = False
+
+    _bmkg_health_cache.update(ok=ok, at=now)
+    return ok
 
 
 async def shutdown():

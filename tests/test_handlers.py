@@ -244,8 +244,11 @@ class TestPing:
         async def db_check():
             return state["db"]
 
+        async def bmkg_check():
+            return state["bmkg"]
+
         monkeypatch.setattr(health_server, "_db_check_fn", db_check)
-        monkeypatch.setattr(health_server, "_bmkg_check_fn", lambda: state["bmkg"])
+        monkeypatch.setattr(health_server, "_bmkg_check_fn", bmkg_check)
         return state
 
     def test_healthy_system_says_so(self, db, sent, health):

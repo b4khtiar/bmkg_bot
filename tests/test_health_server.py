@@ -8,7 +8,9 @@ menangkap kegagalan.
 import asyncio
 import os
 import time
+import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 import pytest
 
@@ -28,8 +30,12 @@ def _register(db, bmkg):
             raise db
         return db
 
-    H._set_checkers(db_check, lambda: (_ for _ in ()).throw(bmkg)
-                    if isinstance(bmkg, Exception) else bmkg)
+    async def bmkg_check():
+        if isinstance(bmkg, Exception):
+            raise bmkg
+        return bmkg
+
+    H._set_checkers(db_check, bmkg_check)
 
 
 class TestGetHealth:
@@ -62,6 +68,19 @@ class TestGetHealth:
         """Tidak mendaftarkan checker bukan berarti sehat."""
         assert H.get_health()["status"] == "degraded"
 
+    def test_async_checkers_are_actually_awaited(self):
+        """Regression: dulu `_check_bmkg_sync()` memanggil checker tanpa
+        await. Coroutine yang belum dijalankan bukan falsy, jadi checker
+        async yang gagal dilaporkan sehat."""
+        _register(False, False)
+
+        async def main():
+            return await H.get_health_async()
+
+        h = asyncio.run(main())
+        assert h["db"] is False
+        assert h["bmkg_reachable"] is False
+
 
 class TestGetHealthAsync:
     """`get_health()` memakai asyncio.run(), yang melempar di dalam loop."""
@@ -74,20 +93,21 @@ class TestGetHealthAsync:
 
         assert asyncio.run(main())["status"] == "ok"
 
-    def test_sync_variant_inside_a_loop_silently_lies(self):
-        """Dokumentasikan alasan varian async ada.
-
-        `get_health()` menelan error checker dengan sengaja (checker yang rusak
-        tidak boleh menggagalkan endpoint), jadi di dalam loop ia tidak crash —
-        ia justru melaporkan `degraded` padahal semua sehat. Justru itu bug-nya:
-        tidak pernah benar-benar memeriksa apa pun, tapi tetap bersuara.
+    def test_sync_variant_inside_a_loop_raises_instead_of_lying(self):
+        """Kendalikan varian sinkron: di dalam loop, `asyncio.run()` melempar —
+        dan ini memang perilaku yang benar. Dulu error itu ditelan per-checker,
+        sehingga varian sinkron justru melaporkan `degraded` yang tampak kredibel
+        padahal tidak pernah benar-benar memeriksa apa pun; /ping pun memakai
+        varian async dan bug ini tidak terlihat. Sekarang salah pakai berarti
+        salah pakai yang terlihat (lebih baik daripada berbohong secara diam).
         """
         _register(True, True)
 
         async def main():
-            return H.get_health()
+            H.get_health()
 
-        assert asyncio.run(main())["status"] == "degraded"
+        with pytest.raises(RuntimeError):
+            asyncio.run(main())
 
 
 @pytest.fixture
@@ -136,3 +156,80 @@ class TestEndpoints:
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(f"{server}/nope")
         assert exc.value.code == 404
+
+
+class TestBmkgProbe:
+    """Checker BMKG harus mem-probe endpoint yang benar-benar dipakai bot.
+
+    Dulu checker mem-HEAD ``https://api.bmkg.go.id`` tanpa path — root domain
+    selalu balik 404, sehingga /ping dan panel admin melaporkan "BMKG tidak
+    dapat dihubungi" sementara /cuaca dan /gempa mengalir normal.
+    """
+
+    @pytest.fixture(autouse=True)
+    def fresh_probe_cache(self):
+        import main as M
+        M._bmkg_health_cache.update(ok=False, at=float("-inf"))
+        yield
+        M._bmkg_health_cache.update(ok=False, at=float("-inf"))
+
+    @staticmethod
+    def _install_client(monkeypatch, statuses):
+        import main as M
+
+        class Resp:
+            def __init__(self, code):
+                self.status_code = code
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def head(self, url, timeout=None):
+                self.calls.append(url)
+                return Resp(statuses.pop(0) if statuses else 200)
+
+        client = Client()
+
+        async def fake_get_http_client():
+            return client
+
+        monkeypatch.setattr(M, "get_http_client", fake_get_http_client)
+        return client
+
+    def test_probes_real_endpoints_not_the_root(self, monkeypatch):
+        import main as M
+        client = self._install_client(monkeypatch, [])
+        assert asyncio.run(M._bmkg_health_check()) is True
+        assert len(client.calls) == len(M._BMKG_PROBE_URLS)
+        for url in client.calls:
+            assert urlparse(url).path not in ("", "/"), (
+                f"probe menyentuh root domain: {url}"
+            )
+
+    def test_one_dead_endpoint_is_enough_to_fail(self, monkeypatch):
+        import main as M
+        self._install_client(monkeypatch, [200, 404])
+        assert asyncio.run(M._bmkg_health_check()) is False
+
+    def test_timeout_counts_as_unreachable(self, monkeypatch):
+        import main as M
+
+        class Client:
+            async def head(self, url, timeout=None):
+                raise TimeoutError("probe timed out")
+
+        async def fake_get_http_client():
+            return Client()
+
+        monkeypatch.setattr(M, "get_http_client", fake_get_http_client)
+        assert asyncio.run(M._bmkg_health_check()) is False
+
+    def test_result_is_cached_within_ttl(self, monkeypatch):
+        import main as M
+        client = self._install_client(monkeypatch, [])
+        assert asyncio.run(M._bmkg_health_check()) is True
+        assert asyncio.run(M._bmkg_health_check()) is True
+        # Kedua panggilan (bleh scrape /healthz tiap detik) hanya mem-probe
+        # BMKG sekali dalam jendela TTL — tanpa cache, probe per scrape.
+        assert len(client.calls) == len(M._BMKG_PROBE_URLS)

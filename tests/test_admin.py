@@ -82,8 +82,11 @@ class TestPanel:
         async def db_check():
             return state["db"]
 
+        async def bmkg_check():
+            return state["bmkg"]
+
         monkeypatch.setattr(health_server, "_db_check_fn", db_check)
-        monkeypatch.setattr(health_server, "_bmkg_check_fn", lambda: state["bmkg"])
+        monkeypatch.setattr(health_server, "_bmkg_check_fn", bmkg_check)
         return state
 
     def test_panel_shows_user_count_and_mode(self, db, admin, sent):
