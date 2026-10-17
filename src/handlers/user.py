@@ -1,3 +1,5 @@
+import functools
+
 from aiogram import Router, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -86,6 +88,78 @@ async def _safe_edit_text(callback: types.CallbackQuery, text: str, **kwargs):
         if "message is not modified" in str(e).lower():
             return
         raise
+
+
+#: Perintah yang tetap berguna saat MAINTENANCE: tidak menyentuh API BMKG, dan
+#: membiarkan pengguna mengubah pengaturan sangat mungkin karena "kenapa tidak
+#: ada notifikasi".
+_ALLOWED_DURING_MAINTENANCE = {"start", "bantuan", "ping", "lokasi", "notifikasi"}
+
+
+def _command_name(message: types.Message) -> str:
+    """Nama perintah yang diketik pengguna, tanpa '/' dan tanpa '@botname'."""
+    parts = (message.text or "").split()
+    if not parts:
+        return ""
+    return parts[0].lstrip("/").split("@")[0]
+
+
+async def check_access(message: types.Message) -> bool:
+    """True bila perintah ini boleh dijalankan; kalau tidak, sudah dibalas.
+
+    Dulu hanya ``/start`` yang memeriksa mode, jadi saat bot ``MAINTENANCE``
+    pengguna masih bisa ``/cuaca`` dan menerima data — pemeliharaan jadi
+    tidak berarti apa-apa.
+
+    Kebijakan yang dipakai:
+    * ``MAINTENANCE`` — hanya perintah yang butuh data BMKG yang dihentikan.
+      ``/start``, ``/bantuan``, ``/ping``, ``/lokasi``, dan ``/notifikasi``
+      tetap jalan supaya pengguna tidak terjebak tanpa jalan keluar.
+    * ``WHITELIST`` — semua perintah tertutup kecuali ``/start``, yang
+      menampilkan penjelasan. Ini soal akses, bukan soal data.
+
+    Admin selalu lolos.
+    """
+    chat_id = message.chat.id
+    if chat_id == ADMIN_ID:
+        return True
+
+    mode = await get_bot_mode()
+    if mode == "OPEN":
+        return True
+
+    if mode == "MAINTENANCE":
+        if _command_name(message) in _ALLOWED_DURING_MAINTENANCE:
+            return True
+        await message.answer(
+            "\u26a0\ufe0f <b>Bot sedang dalam pemeliharaan</b>\n"
+            "Perintah ini tidak tersedia sementara ini. "
+            "Silakan coba lagi nanti.",
+            parse_mode="HTML",
+        )
+        return False
+
+    if mode == "WHITELIST" and not await is_user_whitelisted(chat_id):
+        await message.answer(
+            "\U0001f512 <b>Bot dalam Mode Terbatas</b>\n"
+            "Maaf, Anda belum terdaftar dalam whitelist.",
+            parse_mode="HTML",
+        )
+        return False
+
+    return True
+
+
+def requires_access(handler):
+    """Bungkus handler agar selalu melewati ``check_access`` lebih dulu."""
+
+    @functools.wraps(handler)
+    async def wrapper(message, *args, **kwargs):
+        if not await check_access(message):
+            return None
+        return await handler(message, *args, **kwargs)
+
+    return wrapper
 
 
 @router.message(CommandStart())
@@ -195,6 +269,7 @@ async def _require_location(message: types.Message):
 
 
 @router.message(Command("cuaca"))
+@requires_access
 async def cmd_current_weather(message: types.Message):
     user_data = await _require_location(message)
     if not user_data:
@@ -212,6 +287,7 @@ async def cmd_current_weather(message: types.Message):
 
 
 @router.message(Command("prakiraan"))
+@requires_access
 async def cmd_extended_forecast(message: types.Message):
     user_data = await _require_location(message)
     if not user_data:
@@ -228,6 +304,7 @@ async def cmd_extended_forecast(message: types.Message):
     await _reply_weather(message, result.get("text"), result.get("photo_url"))
 
 @router.message(Command("per_jam", "cuaca_hari_ini"))
+@requires_access
 async def cmd_hourly_today(message: types.Message):
     """Cuaca per jam untuk hari ini.
 
@@ -250,6 +327,7 @@ async def cmd_hourly_today(message: types.Message):
     await _reply_weather(message, result.get("text"), result.get("photo_url"))
 
 @router.message(Command("gempa"))
+@requires_access
 async def cmd_earthquake(message: types.Message):
     raw_data = await fetch_latest_quake()
     if not raw_data:
@@ -275,6 +353,7 @@ async def cmd_earthquake(message: types.Message):
     await _reply_weather(message, msg, img_url)
 
 @router.message(Command("nowcast"))
+@requires_access
 async def cmd_nowcast(message: types.Message):
     user_data = await _require_location(message)
     if not user_data:
@@ -346,6 +425,25 @@ async def cmd_location(message: types.Message):
     )
 
 
+@router.callback_query(F.data.startswith("provpage_"))
+async def handle_province_page(callback: types.CallbackQuery):
+    """Pindah halaman daftar provinsi."""
+    await callback.answer()
+    try:
+        page = int(callback.data.split("_", 1)[1])
+    except ValueError:
+        # Callback basi (dari versi bot sebelumnya) tidak boleh membuat
+        # pengguna terjebak di spinner.
+        page = 0
+
+    await _safe_edit_text(
+        callback,
+        "📍 <b>Pilih Provinsi</b>\n\nSilakan pilih provinsi tempat Anda berada.",
+        parse_mode="HTML",
+        reply_markup=get_province_keyboard(page)
+    )
+
+
 @router.callback_query(F.data.startswith("notif_"))
 async def handle_notif_toggle(callback: types.CallbackQuery):
     pref_name = callback.data.split("_", 1)[1]
@@ -395,20 +493,34 @@ async def cmd_ping(message: types.Message):
     user_data = await get_user_info(message.chat.id)
     loc = user_data['adm_name'] if user_data and user_data['adm_name'] else None
 
-    # The old version hardcoded "Semua sistem berjalan normal" and never
-    # checked anything, so it was most confidently wrong exactly when
-    # something was broken. The only thing /ping can check cheaply is the
-    # database it talks to.
-    db_ok = False
+    # One health source, shared with /healthz and /metrics. The old version
+    # hardcoded "Semua sistem berjalan normal" and never checked anything, so
+    # it was most confidently wrong exactly when something was broken. It also
+    # ran its own DB query, duplicating the health server's.
+    from health_server import get_health_async
+
     try:
-        _db = await get_db()
-        await _db.execute("SELECT 1")
-        db_ok = True
+        # Async variant is mandatory here: the sync one calls asyncio.run(),
+        # which raises inside the bot's own event loop.
+        health = await get_health_async()
     except Exception as e:
-        logger.warning(f"Gagal memeriksa database: {e}")
+        # Health checking must never be the reason /ping fails.
+        logger.warning(f"Gagal membaca status kesehatan: {e}")
+        health = {"status": "unknown", "db": False, "bmkg_reachable": False}
 
     status_line = (
-        "✅ Semua sistem normal." if db_ok else "⚠️ Database tidak dapat diakses."
+        "✅ Semua sistem normal."
+        if health["status"] == "ok"
+        else "⚠️ Ada gangguan: "
+        + ", ".join(
+            part
+            for part, bad in (
+                ("database tidak dapat diakses", not health["db"]),
+                ("BMKG tidak dapat dihubungi", not health["bmkg_reachable"]),
+            )
+            if bad
+        )
+        + "."
     )
 
     msg = (

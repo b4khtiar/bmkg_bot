@@ -78,6 +78,49 @@ class TestPanel:
         text = out[0][0]
         assert "3" in text and "OPEN" in text
 
+    @pytest.fixture
+    def health(self, monkeypatch):
+        """Kendalikan status yang ditampilkan panel."""
+        import health_server
+
+        state = {"db": True, "bmkg": True}
+
+        async def db_check():
+            return state["db"]
+
+        monkeypatch.setattr(health_server, "_db_check_fn", db_check)
+        monkeypatch.setattr(health_server, "_bmkg_check_fn", lambda: state["bmkg"])
+        return state
+
+    def test_panel_shows_healthy_system(self, db, admin, sent, health):
+        out, Recorder = sent
+        asyncio.run(A.cmd_admin_panel(Recorder("/admin")))
+        text = out[0][0]
+        assert "🟢 Database" in text and "🟢 BMKG" in text
+
+    def test_panel_marks_degraded_components(self, db, admin, sent, health):
+        """Admin memutuskan kapan menyalakan MAINTENANCE — panel harus
+        menunjukkan komponen mana yang bermasalah, bukan sekadar 'degraded'."""
+        health["bmkg"] = False
+        out, Recorder = sent
+        asyncio.run(A.cmd_admin_panel(Recorder("/admin")))
+        text = out[0][0]
+        assert "🟢 Database" in text
+        assert "🔴 BMKG" in text
+
+    def test_health_failure_does_not_break_panel(self, db, admin, sent, monkeypatch):
+        """Panel admin adalah alat darurat; ia tidak boleh ikut mati saat
+        sistem yang dipantau justru sedang bermasalah."""
+        def boom():
+            raise RuntimeError("checker exploded")
+
+        monkeypatch.setattr(A, "get_health_async", boom)
+        out, Recorder = sent
+        asyncio.run(A.cmd_admin_panel(Recorder("/admin")))
+        text = out[0][0]
+        assert "Panel Admin" in text, "panel tidak boleh gagal karena health check"
+        assert "tidak dapat dibaca" in text
+
     def test_mode_change_refreshes_panel_in_place(self, db, admin, monkeypatch, sent):
         """Dulu panel diganti dua baris 'Status Diubah ke', sehingga jumlah
         pengguna, daftar mode, dan petunjuk hilang tanpa jalan kembali."""

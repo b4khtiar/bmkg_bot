@@ -10,6 +10,7 @@ from database import (
 from utils.text import esc
 from utils.keyboards import get_admin_panel_keyboard
 from utils.constants import _VALID_BOT_MODES
+from health_server import get_health_async
 
 router = Router()
 ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID") or 0)
@@ -40,9 +41,27 @@ async def _panel_text() -> str:
     return (
         "🛠 <b>Panel Admin</b>\n\n"
         f"👥 <b>Total pengguna</b>  {user_count}\n"
-        f"🤖 <b>Mode saat ini</b>  {esc(current_mode)}\n\n"
+        f"🤖 <b>Mode saat ini</b>  {esc(current_mode)}\n"
+        f"{await _health_line()}\n\n"
         "Pilih mode di bawah untuk mengubah akses pengguna."
     )
+
+
+async def _health_line() -> str:
+    """Satu baris status DB/BMKG, dari sumber yang sama dengan /ping.
+
+    Admin memutuskan kapan menyalakan MAINTENANCE dari panel ini, jadi panel
+    perlu tahu apakah BMKG sedang tidak bisa dihubungi tanpa harus keluar dan
+    mengetik /ping. Pemeriksaan yang gagal tidak boleh merusak panel.
+    """
+    try:
+        h = await get_health_async()
+    except Exception as e:
+        logger.warning(f"Gagal membaca status kesehatan untuk panel admin: {e}")
+        return "🖥 <b>Status</b>  tidak dapat dibaca"
+    db = "🟢" if h["db"] else "🔴"
+    bmkg = "🟢" if h["bmkg_reachable"] else "🔴"
+    return f"🖥 <b>Status</b>  {db} Database   {bmkg} BMKG"
 
 @router.callback_query(F.data.startswith("setmode_"))
 async def handle_set_mode(callback: types.CallbackQuery):

@@ -9,7 +9,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = int(os.getenv("HEALTH_SERVER_PORT", "8080"))
+def _port() -> int:
+    """Port dibaca saat server dijalankan, bukan saat modul diimpor.
+
+    Membacanya di level modul membuat nilainya terkunci sejak import, sehingga
+    override lewat environment setelah import tidak berlaku sama sekali.
+    """
+    return int(os.getenv("HEALTH_SERVER_PORT", "8080"))
 
 _started_at = None
 _server: HTTPServer = None
@@ -27,13 +33,69 @@ def _set_checkers(db_fn, bmkg_fn):
     _bmkg_check_fn = bmkg_fn
 
 
+#: Status kesehatan dihitung di satu tempat saja. Ada DUA pemanggil dengan
+#: konteks berbeda: thread server HTTP (tidak punya event loop) dan handler
+#: aiogram (sudah di dalam event loop). `get_health()` memakai asyncio.run(),
+#: yang hanya aman di thread; `get_health_async()` menunggu langsung. Memakai
+#: yang salah akan selalu melempar "cannot be called from a running event loop".
+
+
+def _check_bmkg_sync() -> bool:
+    try:
+        return bool(_bmkg_check_fn()) if _bmkg_check_fn else False
+    except Exception as e:
+        logger.warning(f"BMKG healthcheck error: {e}")
+        return False
+
+
+def _assemble(db_ok: bool, bmkg_ok: bool) -> dict:
+    return {
+        "status": "ok" if (db_ok and bmkg_ok) else "degraded",
+        "db": db_ok,
+        "bmkg_reachable": bmkg_ok,
+        "uptime_seconds": int(time.time() - _started_at) if _started_at else 0,
+    }
+
+
+def get_health() -> dict:
+    """Status kesehatan — untuk pemanggil di luar event loop (server HTTP).
+
+    Server kesehatan berjalan di thread terpisah, jadi `asyncio.run()` aman
+    di sini.
+    """
+    db_ok = False
+    if _db_check_fn:
+        try:
+            db_ok = asyncio.run(_db_check_fn())
+        except Exception as e:
+            logger.warning(f"DB healthcheck error: {e}")
+    return _assemble(db_ok, _check_bmkg_sync())
+
+
+async def get_health_async() -> dict:
+    """Status kesehatan — untuk pemanggil yang sudah di dalam event loop.
+
+    WAJIB dipakai oleh handler aiogram. Versi sinkron memanggil
+    `asyncio.run()`, yang melempar "cannot be called from a running event loop"
+    tepat di dalam loop bot — artinya `/ping` akan selalu melaporkan "degraded"
+    dan根本就没有 pernah memeriksa apa pun.
+    """
+    db_ok = False
+    if _db_check_fn:
+        try:
+            db_ok = bool(await _db_check_fn())
+        except Exception as e:
+            logger.warning(f"DB healthcheck error: {e}")
+    return _assemble(db_ok, _check_bmkg_sync())
+
+
 class _HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Suppress default logging
 
     def do_GET(self):
-        global _started_at
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
 
         if path == "/healthz":
             self._respond_health()
@@ -44,51 +106,31 @@ class _HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _respond_health(self):
-        db_ok = False
-        bmkg_ok = False
-
-        if _db_check_fn:
-            try:
-                db_ok = asyncio.run(_db_check_fn())
-            except Exception as e:
-                logger.warning(f"DB healthcheck error: {e}")
-
-        if _bmkg_check_fn:
-            try:
-                bmkg_ok = _bmkg_check_fn()
-            except Exception as e:
-                logger.warning(f"BMKG healthcheck error: {e}")
-
-        status = "ok" if (db_ok and bmkg_ok) else "degraded"
-        uptime = int(time.time() - _started_at) if _started_at else 0
-
-        body = {
-            "status": status,
-            "db": db_ok,
-            "bmkg_reachable": bmkg_ok,
-            "uptime_seconds": uptime,
-        }
+        body = get_health()
         payload = json.dumps(body).encode("utf-8")
 
-        self.send_response(200 if status == "ok" else 200)
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
     def _respond_metrics(self):
-        uptime = int(time.time() - _started_at) if _started_at else 0
+        health = get_health()
 
         lines = [
             "# HELP bmkg_bot_uptime_seconds Bot uptime",
             "# TYPE bmkg_bot_uptime_seconds gauge",
-            f"bmkg_bot_uptime_seconds {uptime}",
+            f"bmkg_bot_uptime_seconds {health['uptime_seconds']}",
             "# HELP bmkg_bot_db_healthy DB health (1=ok, 0=down)",
             "# TYPE bmkg_bot_db_healthy gauge",
-            f"bmkg_bot_db_healthy {1 if _db_check_fn else 0}",
+            # Previously `1 if _db_check_fn` — i.e. "1" the moment a checker was
+            # registered, never the actual result. /metrics reported a healthy
+            # database while the database was down.
+            f"bmkg_bot_db_healthy {1 if health['db'] else 0}",
             "# HELP bmkg_bot_bmkg_reachable BMKG API reachable (1=ok, 0=down)",
             "# TYPE bmkg_bot_bmkg_reachable gauge",
-            f"bmkg_bot_bmkg_reachable {1 if _bmkg_check_fn else 0}",
+            f"bmkg_bot_bmkg_reachable {1 if health['bmkg_reachable'] else 0}",
         ]
         payload = "\n".join(lines).encode("utf-8")
 
@@ -102,7 +144,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
 def _run_server():
     global _started_at, _server
     _started_at = time.time()
-    port = DEFAULT_PORT
+    port = _port()
     _server = HTTPServer(("0.0.0.0", port), _HealthHandler)
     logger.info(f"Health server listening on :{port} (threaded)", extra={"bot_mode": "health"})
     _server.serve_forever()
@@ -117,7 +159,6 @@ def start_health_server():
 
 
 def stop_health_server():
-    global _server
     if _server:
         _server.shutdown()
         _server.server_close()

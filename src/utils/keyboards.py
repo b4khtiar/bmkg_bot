@@ -2,12 +2,56 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import types
 from utils.constants import REGION_DATA
 
-def get_province_keyboard():
-    """Daftar provinsi, dua per baris seperti keyboard kota."""
+
+#: Tombol provinsi per halaman. Dipaginasi karena peta wilayah sudah-version
+#: 34 provinsi: satu tombol per baris menghasilkan dinding 34 baris yang harus
+#: di-scroll, sementara keyboard kota sudah dua per baris.
+PROVINCES_PER_PAGE = 10
+
+
+def get_province_keyboard(page: int = 0):
+    """Daftar provinsi, dua per baris, dipaginasi.
+
+    ``page`` di-clamp ke rentang yang benar, jadi callback_data yang rusak
+    atau basi tidak bisa membuat pengguna terjebak di halaman kosong.
+    """
+    provinces = list(REGION_DATA.keys())
+    if not provinces:
+        return _markup([])
+
+    total_pages = max(1, -(-len(provinces) // PROVINCES_PER_PAGE))
+    page = min(max(page, 0), total_pages - 1)
+    visible = provinces[page * PROVINCES_PER_PAGE:(page + 1) * PROVINCES_PER_PAGE]
+
     builder = InlineKeyboardBuilder()
-    for prov in REGION_DATA.keys():
+    for prov in visible:
         builder.button(text=prov, callback_data=f"prov_{prov}")
+    # Two per row, same as the city keyboard it hands off to.
     builder.adjust(2)
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(types.InlineKeyboardButton(
+                text="⬅️ Sebelumnya", callback_data=f"provpage_{page - 1}"))
+        if page < total_pages - 1:
+            nav.append(types.InlineKeyboardButton(
+                text="Berikutnya ➡️", callback_data=f"provpage_{page + 1}"))
+        if nav:
+            builder.row(*nav)
+
+    return builder.as_markup()
+
+
+def province_page_count() -> int:
+    provinces = len(REGION_DATA)
+    return max(1, -(-provinces // PROVINCES_PER_PAGE))
+
+
+def _markup(buttons):
+    builder = InlineKeyboardBuilder()
+    for b in buttons:
+        builder.row(b)
     return builder.as_markup()
 
 

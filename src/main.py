@@ -5,6 +5,7 @@ import signal
 import logging
 import httpx
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand, BotCommandScopeChat
 from handlers import user, admin
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services.bmkg_api import (
@@ -434,6 +435,51 @@ async def shutdown():
 
 
 
+#: Menu perintah yang dilihat pengguna di Telegram.
+#:
+#: Hanya nama BARU yang dipublikasikan. Nama lama (`/cuaca_hari_ini`,
+#: `/atur_notif`) tetap diterima sebagai alias dengan satu pesan pemberitahuan,
+#: jadi muscle memory tidak hilang — tapi menu mengajari kosakata yang benar.
+#:
+#: Tanpa ini, menu perintah Telegram kosong: tidak ada yang memberi tahu
+#: fitur apa saja yang ada.
+USER_COMMANDS = [
+    ("cuaca", "Cuaca saat ini"),
+    ("per_jam", "Cuaca per jam hari ini"),
+    ("prakiraan", "Prakiraan 3 hari ke depan"),
+    ("gempa", "Gempa bumi terkini"),
+    ("nowcast", "Peringatan dini cuaca"),
+    ("lokasi", "Atur atau ubah lokasi"),
+    ("notifikasi", "Atur notifikasi yang diterima"),
+    ("bantuan", "Daftar perintah"),
+    ("ping", "Cek status bot"),
+]
+
+ADMIN_COMMANDS = [
+    ("admin", "Panel kontrol admin"),
+    ("whitelist", "Kelola whitelist"),
+]
+
+
+async def _publish_commands(bot):
+    """Terbitkan menu perintah ke Telegram.
+
+    Kegagalan di sini tidak boleh menghentikan bot: menu perintah hanya
+    petunjuk, bukan fungsi. Bot yang jalan tanpa menu lebih baik daripada bot
+    yang mati karena API-nya menolak.
+    """
+    try:
+        await bot.set_my_commands(
+            [BotCommand(name, description) for name, description in USER_COMMANDS]
+        )
+        await bot.set_my_commands(
+            [BotCommand(name, description) for name, description in ADMIN_COMMANDS],
+            scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+        )
+    except Exception as e:
+        logger.warning(f"Gagal menerbitkan menu perintah: {e}")
+
+
 async def main():
     await init_db()
 
@@ -447,6 +493,7 @@ async def main():
     dp.include_router(user.router)
 
     weather_table.log_problems(logger)
+    await _publish_commands(bot)
 
     scheduler.add_job(check_quake_job, "interval", minutes=2, args=[bot])
     scheduler.add_job(daily_weather_job, "cron", hour=6, minute=30, args=[bot, "Pagi"])
