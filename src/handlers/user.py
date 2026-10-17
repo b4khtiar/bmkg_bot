@@ -10,7 +10,9 @@ from database import (
 from utils.keyboards import (
     get_province_keyboard, get_city_keyboard, get_start_keyboard,
     get_notif_prefs_keyboard, get_change_location_keyboard,
+    get_weather_location_choices,
 )
+from utils import locations
 from services.bmkg_api import (
     fetch_weather_data, parse_weather_current,
     fetch_latest_quake, fetch_nowcast_alerts, summarize_nowcast_rss,
@@ -104,8 +106,25 @@ def _command_name(message: types.Message) -> str:
     return parts[0].lstrip("/").split("@")[0]
 
 
-async def check_access(message: types.Message) -> bool:
+def _command_arg(message: types.Message) -> str:
+    """Isi argumen perintah: sisa teks setelah kata pertama.
+
+    "/cuaca  Wates,  Kab. Kulon Progo " dan "/cuaca Wates, Kab. Kulon Progo"
+    harus sama; spasi internal dirapatkan bersama, dan "/cuaca" telanjang
+    menghasilkan string kosong (jalur lokasi tersimpan).
+    """
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return " ".join(parts[1].split())
+
+
+async def check_access(message: types.Message, command: str = None) -> bool:
     """True bila perintah ini boleh dijalankan; kalau tidak, sudah dibalas.
+
+    ``command`` mengesampingkan deteksi dari teks pesan — dipakai oleh handler
+    callback, yang pesan sumbernya bukan perintah dan justru akan di-scrape
+    jadi keputusan yang kebetulan benar.
 
     Dulu hanya ``/start`` yang memeriksa mode, jadi saat bot ``MAINTENANCE``
     pengguna masih bisa ``/cuaca`` dan menerima data — pemeliharaan jadi
@@ -129,7 +148,7 @@ async def check_access(message: types.Message) -> bool:
         return True
 
     if mode == "MAINTENANCE":
-        if _command_name(message) in _ALLOWED_DURING_MAINTENANCE:
+        if (command or _command_name(message)) in _ALLOWED_DURING_MAINTENANCE:
             return True
         await message.answer(
             "\u26a0\ufe0f <b>Bot sedang dalam pemeliharaan</b>\n"
@@ -271,11 +290,25 @@ async def _require_location(message: types.Message):
 @router.message(Command("cuaca"))
 @requires_access
 async def cmd_current_weather(message: types.Message):
+    arg = _command_arg(message)
+    if arg:
+        return await _cuaca_for_query(message, arg)
+
     user_data = await _require_location(message)
     if not user_data:
         return
 
-    raw_data = await fetch_weather_data(user_data['adm_code'])
+    await _send_current_weather(message, user_data['adm_code'])
+
+
+async def _send_current_weather(message: types.Message, adm_code: str) -> None:
+    """Ambil dan kirim cuaca saat ini untuk satu kode adm4.
+
+    Jalur yang sama untuk lokasi tersimpan pengguna maupun lokasi yang
+    ditanyakan lewat argumen / tombol kandidat — supaya guard caption, foto,
+    dan fallback pemberitahuan tidak berjalan berbeda di antara keduanya.
+    """
+    raw_data = await fetch_weather_data(adm_code)
     if not raw_data:
         return await message.answer(
             "⚠️ Gagal mengambil data cuaca. BMKG sedang tidak dapat dihubungi, "
@@ -284,6 +317,82 @@ async def cmd_current_weather(message: types.Message):
 
     result = await parse_weather_current(raw_data)
     await _reply_weather(message, result.get("text"), result.get("photo_url"))
+
+
+async def _cuaca_for_query(message: types.Message, query: str) -> None:
+    """Cuaca saat ini untuk lokasi yang diketik, tanpa mengubah lokasi tersimpan.
+
+    Cakupan data wilayah baru DI Yogyakarta, jadi ketikan di luar pustaka tidak
+    ditebak-nebak melainkan ditolak dengan daftar contoh yang valid — sama
+    seperti pemilih lokasi via /lokasi.
+    """
+    resolved = locations.resolve_location(query)
+
+    if resolved["status"] == "none":
+        examples = ", ".join(
+            f"<code>{esc(label)}</code>" for label in locations.example_locations()
+        )
+        await message.answer(
+            "🗺️ <b>Lokasi tidak tersedia</b>\n\n"
+            f"Cakupan saya belum mencakup \"{esc(query)}\". "
+            f"Saat ini baru <b>{esc(locations.coverage_summary())}</b> "
+            f"yang didukung, misalnya: {examples}.\n\n"
+            "Untuk memilih lokasi dari daftar dan menyimpannya, gunakan /lokasi.",
+            parse_mode="HTML",
+        )
+        return
+
+    if resolved["status"] == "ambiguous":
+        names = "\n".join(f"• {esc(m['label'])}" for m in resolved["matches"])
+        await message.answer(
+            "🏘️ <b>Beberapa lokasi cocok</b>\n\n"
+            f"{names}\n\n"
+            "Pilih salah satu di bawah, atau ketik nama yang lebih spesifik.",
+            parse_mode="HTML",
+            reply_markup=get_weather_location_choices(resolved["matches"]),
+        )
+        return
+
+    await _send_current_weather(message, resolved["matches"][0]["adm4"])
+
+
+@router.callback_query(F.data.startswith("wxloc_"))
+async def handle_weather_location_choice(callback: types.CallbackQuery):
+    """Kirim cuaca untuk lokasi yang dipilih dari daftar kandidat.
+
+    Akses dicek dengan perintah eksplisit ``cuaca``: mengandalkan teks pesan
+    sumber berarti meng-scrape emoji/HTML dan keputusan mode hanya kebetulan
+    benar. Kode adm4 dari callback_data divalidasi ke pustaka — kode asing
+    tidak boleh diteruskan ke API.
+    """
+    if not callback.message:
+        return await callback.answer("Pesan tidak tersedia lagi.")
+
+    if not await check_access(callback.message, command="cuaca"):
+        return await callback.answer()
+
+    adm4 = callback.data.split("_", 1)[1]
+    label = locations.label_for(adm4)
+    if label is None:
+        return await callback.answer("Lokasi tidak dikenal.", show_alert=True)
+
+    await callback.answer("Mengambil cuaca…")
+    await _send_current_weather(callback.message, adm4)
+
+    # Pilihannya sudah terjawab; ganti pesan kandidat dengan konfirmasi
+    # satu baris (edit sekaligus menghapus keyboard).
+    try:
+        await callback.message.edit_text(
+            f"✅ Cuaca {esc(label)} ditampilkan di bawah.",
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        logger.warning(
+            "Pesan kandidat lokasi gagal dikonfirmasi", exc_info=True,
+            extra={"chat_id": callback.message.chat.id}
+        )
 
 
 @router.message(Command("prakiraan"))
@@ -468,7 +577,8 @@ async def handle_notif_toggle(callback: types.CallbackQuery):
 async def cmd_help(message: types.Message):
     await message.answer(
         "<b>🤖 Perintah yang tersedia</b>\n\n"
-        "🌤️ <code>/cuaca</code> — cuaca saat ini di lokasi Anda\n"
+        "🌤️ <code>/cuaca [lokasi]</code> — cuaca saat ini; tanpa argumen memakai "
+        "lokasi yang tersimpan\n"
         "⏰ <code>/per_jam</code> — cuaca per jam hari ini\n"
         "📅 <code>/prakiraan</code> — prakiraan 3 hari ke depan\n"
         "🚨 <code>/gempa</code> — gempa bumi terkini\n"

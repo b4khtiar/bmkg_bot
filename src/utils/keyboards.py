@@ -73,6 +73,28 @@ def get_city_keyboard(province_name: str):
     return builder.as_markup()
 
 
+#: Batas kandidat yang ditawarkan untuk /cuaca <lokasi> ambigu — daftar yang
+#: terlalu panjang jadi dinding tombol yang harus di-scroll.
+_MAX_LOCATION_CHOICES = 10
+
+
+def get_weather_location_choices(matches):
+    """Tombol kandidat lokasi untuk /cuaca dengan ketikan ambigu.
+
+    callback_data memuat kode adm4 langsung (wxloc_<adm4>) — tanpa status
+    sesi, jadi tombol tetap benar walau bot di-restart dulu. Batasi jumlahnya:
+    resolusi tier bisa memilih lebih kandidat daripada yang layak ditampilkan.
+    """
+    builder = InlineKeyboardBuilder()
+    for m in matches[:_MAX_LOCATION_CHOICES]:
+        callback_data = f"wxloc_{m['adm4']}"
+        assert len(callback_data.encode("utf-8")) <= 64, \
+            f"callback_data too long for {m['adm4']}: {len(callback_data)} bytes"
+        builder.button(text=m["label"], callback_data=callback_data)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def get_start_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="📍 Set Lokasi Wilayah", callback_data="setup_location")

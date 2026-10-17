@@ -483,7 +483,7 @@ async def shutdown():
 #: Tanpa ini, menu perintah Telegram kosong: tidak ada yang(memberi tahu
 #: fitur apa saja yang ada.
 USER_COMMANDS = [
-    ("cuaca", "Cuaca saat ini"),
+    ("cuaca", "Cuaca saat ini, opsional: nama lokasi"),
     ("per_jam", "Cuaca per jam hari ini"),
     ("prakiraan", "Prakiraan 3 hari ke depan"),
     ("gempa", "Gempa bumi terkini"),

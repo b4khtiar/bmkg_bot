@@ -23,7 +23,7 @@ Bot Telegram untuk memantau data cuaca, gempa bumi, dan peringatan dini cuaca (n
 | Command | Deskripsi |
 |---------|-----------|
 | `/start` | Registrasi awal & atur lokasi |
-| `/cuaca` | Cuaca saat ini (jam terdekat) |
+| `/cuaca` | Cuaca saat ini — `/cuaca` tanpa argumen memakai lokasi tersimpan; `/cuaca wates` menjawab untuk lokasi yang disebut (cakupan DI Yogyakarta) |
 | `/prakiraan` | Prakiraan cuaca 3 hari ke depan (ringkasan + 08.00 & 17.00) |
 | `/per_jam` | Cuaca per jam untuk hari ini |
 | `/gempa` | Informasi gempa bumi terkini |

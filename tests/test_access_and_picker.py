@@ -273,3 +273,39 @@ class TestProvinceKeyboard:
     def test_empty_region_data(self, monkeypatch):
         monkeypatch.setattr(K, "REGION_DATA", {})
         assert self._buttons(K.get_province_keyboard(0)) == []
+
+
+class TestWeatherLocationChoices:
+    """Keyboard kandidat untuk /cuaca <lokasi> ambigu."""
+
+    @staticmethod
+    def _buttons(markup):
+        return [b for row in markup["inline_keyboard"] for b in row]
+
+    @staticmethod
+    def _matches(n):
+        return [
+            {"adm4": f"34.0{i}.09.200{i}", "label": f"Tempat{i}, Kab. X"}
+            for i in range(n)
+        ]
+
+    def test_two_per_row_like_other_picklists(self):
+        markup = K.get_weather_location_choices(self._matches(6))
+        rows = markup["inline_keyboard"]
+        assert all(len(r) == 2 for r in rows), rows
+
+    def test_callback_data_encodes_the_adm4(self):
+        buttons = self._buttons(K.get_weather_location_choices(self._matches(3)))
+        assert all(b.callback_data.startswith("wxloc_") for b in buttons)
+        assert all(len(b.callback_data.encode("utf-8")) <= 64 for b in buttons)
+
+    def test_candidates_are_capped(self):
+        """Tier resolusi bisa memilih banyak kandidat; keyboard harus dibatasi
+        supaya tidak menjadi dinding tombol."""
+        buttons = self._buttons(
+            K.get_weather_location_choices(self._matches(25)))
+        assert len(buttons) == K._MAX_LOCATION_CHOICES
+
+    def test_empty_match_list_gives_empty_keyboard(self):
+        markup = K.get_weather_location_choices([])
+        assert markup["inline_keyboard"] == []

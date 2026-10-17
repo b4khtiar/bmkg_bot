@@ -134,6 +134,203 @@ class TestLocationGate:
         assert "/atur_notif" not in out[0][0]
 
 
+class _WeatherStub:
+    """Rekam kode adm4 yang diminta, dan jawab payload cuaca palsu."""
+
+    def __init__(self, monkeypatch):
+        self.calls = []
+        import handlers.user as U
+
+        async def fake_fetch(adm_code):
+            self.calls.append(adm_code)
+            return {"data": "stub"}
+
+        async def fake_parse(raw):
+            return {"text": "🌤️ <b>CUACA SAAT INI</b>", "photo_url": None}
+
+        monkeypatch.setattr(U, "fetch_weather_data", fake_fetch)
+        monkeypatch.setattr(U, "parse_weather_current", fake_parse)
+
+
+class TestCuacaArgument:
+    """/cuaca <lokasi> → cuaca untuk lokasi itu tanpa menyimpannya."""
+
+    def test_argument_queries_that_location_by_code(self, db, sent, monkeypatch):
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca Wates")))
+        assert stub.calls == ["34.01.02.2001"], "harus memakai kode adm4 pustaka"
+        assert any("CUACA SAAT INI" in t for t, _ in out)
+
+    def test_argument_does_not_touch_saved_location(self, db, sent, monkeypatch):
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca wonosari")))
+        assert stub.calls, "harus mem-fetch lokasi yang diketik"
+        assert db.location_updated is None, "lokasi tersimpan tidak boleh berubah"
+
+    def test_argument_works_without_saved_location(self, db, sent, monkeypatch):
+        """/cuaca wonosari tanpa lokasi tersimpan tetap menjawab, bukan
+        menampilkan pemilih lokasi."""
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca wonosari")))
+        assert stub.calls, "argumen tidak boleh butuh lokasi tersimpan"
+        assert not any("belum diatur" in t for t, _ in out)
+
+    def test_botname_suffix_is_stripped_from_command(self, db, sent, monkeypatch):
+        """`/cuaca@BotName wates` tetap harus dikenali (bot di grup)."""
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca@CuacaBot wates")))
+        assert stub.calls == ["34.01.02.2001"]
+
+    def test_unknown_location_says_no_with_examples(self, db, sent, monkeypatch):
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca jakarta")))
+        assert not stub.calls, "lokasi di luar pustaka tidak boleh di-fetch"
+        text = out[0][0]
+        assert "tidak tersedia" in text.lower()
+        assert "Yogyakarta" in text, "cakupan harus disebut jujur"
+        assert "/lokasi" in text, "arahkan ke pemilih lokasi"
+
+    def test_unknown_location_echoes_query_escaped(self, db, sent, monkeypatch):
+        """Gema ketikan pengguna harus di-esc — `<b>` mentah dalam jawaban
+        berarti teks pengguna bisa menyuntik entitas HTML."""
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca <b>bold</b>")))
+        text = out[0][0]
+        assert "<b>bold</b>" not in text
+        assert "&lt;b&gt;bold&lt;/b&gt;" in text
+
+    def test_ambiguous_query_offers_button_candidates(self, db, sent, monkeypatch):
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca kulon progo")))
+        assert not stub.calls, "ambigu tidak boleh dipilih secara diam-diam"
+        markup = out[0][1].get("reply_markup")
+        assert markup is not None, "harus menawarkan tombol kandidat"
+        buttons = [b for row in markup["inline_keyboard"] for b in row]
+        datas = [b.callback_data for b in buttons]
+        assert set(datas) == {"wxloc_34.01.09.2001", "wxloc_34.01.02.2001"}
+        texts = [b.text for b in buttons]
+        assert "Jatimulyo, Kab. Kulon Progo" in texts
+        assert "Wates, Kab. Kulon Progo" in texts
+
+    def test_callback_sends_weather_and_clears_choices(self, db, sent, monkeypatch):
+        from types import SimpleNamespace
+        stub = _WeatherStub(monkeypatch)
+
+        class Msg:
+            def __init__(self):
+                self.chat = SimpleNamespace(id=1)
+                self.replies = []
+                self.edits = []
+
+            async def answer(self, text=None, **kwargs):
+                self.replies.append((text, kwargs))
+                return self
+
+            async def edit_text(self, text=None, **kwargs):
+                self.edits.append((text, kwargs))
+                return self
+
+        class Cb:
+            def __init__(self, data, msg):
+                self.data = data
+                self.message = msg
+                self.toasts = []
+
+            async def answer(self, text=None, **kwargs):
+                self.toasts.append((text, kwargs))
+                return None
+
+        msg = Msg()
+        cb = Cb("wxloc_34.01.02.2001", msg)
+        asyncio.run(U.handle_weather_location_choice(cb))
+        assert stub.calls == ["34.01.02.2001"]
+        assert any("✅" in t for t, _ in msg.edits), (
+            "daftar kandidat harus diganti konfirmasi (keyboard ikut hilang)")
+        assert any(t and "Mengambil" in t for t, _ in cb.toasts), (
+            "spinner harus dijawab dengan toast proses")
+
+    def test_callback_rejects_code_outside_library(self, db, sent, monkeypatch):
+        """"Keyboard basi atau callback_data yang di-craft tidak boleh
+        menjadikan bot proxy lokasi di luar cakupan."""
+        from types import SimpleNamespace
+        stub = _WeatherStub(monkeypatch)
+
+        class Msg:
+            def __init__(self):
+                self.chat = SimpleNamespace(id=1)
+                self.replies = []
+                self.edits = []
+
+            async def answer(self, text=None, **kwargs):
+                self.replies.append((text, kwargs))
+                return self
+
+            async def edit_text(self, text=None, **kwargs):
+                self.edits.append((text, kwargs))
+                return self
+
+        class Cb:
+            def __init__(self, data, msg):
+                self.data = data
+                self.message = msg
+                self.toasts = []
+
+            async def answer(self, text=None, **kwargs):
+                self.toasts.append((text, kwargs))
+                return None
+
+        msg = Msg()
+        cb = Cb("wxloc_31.75.03.1001", msg)
+        asyncio.run(U.handle_weather_location_choice(cb))
+        assert not stub.calls, "kode asing tidak boleh diteruskan ke API"
+        assert not msg.edits, "tidak ada konfirmasi untuk kode asing"
+        assert any(t and "dikenal" in t for t, _ in cb.toasts)
+
+    def test_callback_gated_during_maintenance(self, db, sent, monkeypatch):
+        """"Keyboard lama (sebelum pemeliharaan) tidak boleh tetap menyerahkan
+        data saat bot MAINTENANCE."""
+        from types import SimpleNamespace
+        stub = _WeatherStub(monkeypatch)
+        db.mode = "MAINTENANCE"
+
+        class Msg:
+            def __init__(self):
+                self.chat = SimpleNamespace(id=1)
+                self.replies = []
+                self.edits = []
+
+            async def answer(self, text=None, **kwargs):
+                self.replies.append((text, kwargs))
+                return self
+
+            async def edit_text(self, text=None, **kwargs):
+                self.edits.append((text, kwargs))
+                return self
+
+        class Cb:
+            def __init__(self, data, msg):
+                self.data = data
+                self.message = msg
+                self.toasts = []
+
+            async def answer(self, text=None, **kwargs):
+                self.toasts.append((text, kwargs))
+                return None
+
+        msg = Msg()
+        asyncio.run(U.handle_weather_location_choice(
+            Cb("wxloc_34.01.02.2001", msg)))
+        assert not stub.calls, "pemeliharaan harus memblokir jalur tombol juga"
+        assert not msg.edits
+        assert any(t and "pemeliharaan" in t.lower() for t, _ in msg.replies)
+
+
 class TestHelpAndLocationCommands:
     def test_help_lists_new_command_names(self, db, sent):
         out, Recorder = sent
