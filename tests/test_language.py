@@ -23,6 +23,7 @@ USER_FACING = [
     "utils/design.py",
     "utils/keyboards.py",
     "utils/insight_templates.py",
+    "utils/weather_table.py",
 ]
 
 # Kata sapaan yang tidak konsisten. "Anda" adalah bentuk yang dipakai di

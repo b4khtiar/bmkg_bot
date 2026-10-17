@@ -18,6 +18,7 @@ from database import (
     enqueue_failed_send, retry_pending_sends, delete_pending_send,
     increment_retry_count,
 )
+from utils import weather_table
 from utils.constants import get_province_name
 from utils.design import CAPTION_LIMIT
 from utils.formatters import format_quake, format_nowcast_alert
@@ -444,6 +445,8 @@ async def main():
 
     dp.include_router(admin.router)
     dp.include_router(user.router)
+
+    weather_table.log_problems(logger)
 
     scheduler.add_job(check_quake_job, "interval", minutes=2, args=[bot])
     scheduler.add_job(daily_weather_job, "cron", hour=6, minute=30, args=[bot, "Pagi"])

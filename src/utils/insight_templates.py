@@ -1,24 +1,53 @@
 import random
 import logging
 
+from utils import weather_table as wt
+
 logger = logging.getLogger(__name__)
 
-WEATHER_CODE_GROUPS = {
-    'thunderstorm': {95, 96, 97},
-    'rain': set(range(60, 83)),
-    'light_rain': {60, 61, 80, 81},
-    'heavy_rain': {63, 64, 65, 67, 82},
-    'drizzle': {50, 51, 52, 53, 54, 55, 56, 57},
-    'clear': {0, 1, 2, 3},
-    'haze': {4, 5, 10, 45},
-}
+# Himpunan ini tidak lagi ditulis manual. Semuanya diturunkan dari
+# WEATHER_CONDITIONS, sehingga mustahil ada kode yang punya kalimat insight tapi
+# tidak punya label, atau sebaliknya.
+THUNDERSTORM_CODES = wt.THUNDERSTORM_CODES
+HEAVY_RAIN_CODES = wt.HEAVY_RAIN_CODES
+LIGHT_RAIN_CODES = wt.LIGHT_RAIN_CODES
+DRIZZLE_CODES = wt.DRIZZLE_CODES
+HAZE_CODES = wt.HAZE_CODES
+WET_CODES = wt.WET_CODES
+
+#: Langit cerah: kode 0 ("Cerah") plus 1-2 ("Cerah Berawan"). Kode 3 dan 4
+#: ("Berawan"/"Berawan Tebal") sengaja TIDAK termasuk — sebelumnya keduanya
+#: ada di himpunan clear, sehingga hari mendung penuh bisa menghasilkan
+#: "Hari cerah sempurna! Cocok untuk jemur pakaian".
+CLEAR_SKY_CODES = wt.CLEAR_SKY_CODES | wt.PARTLY_SKY_CODES
+CLOUDY_SKY_CODES = wt.CLOUDY_SKY_CODES
+#: Dipisah ke konstanta supaya himpunan tidak digabung ulang di dalam
+#: generator yang dievaluasi per elemen.
+NICE_SKY_CODES = CLEAR_SKY_CODES | CLOUDY_SKY_CODES
+
+
+def _hour_of(entry) -> int | None:
+    """Jam dari ``local_datetime`` BMKG, atau None bila format tak terduga.
+
+    Sebelumnya `local_dt.split(' ')[1]` dipakai langsung — pola yang persis
+    sama dengan yang diperingatkan AGENTS.md, dan gagal diam-diam untuk
+    setiap entry yang tidak punya bagian waktu.
+    """
+    parts = str(entry.get("local_datetime", "")).split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1].split(":")[0])
+    except (IndexError, ValueError):
+        return None
+
 
 def analyze_weather(weather_list):
     if not weather_list:
         return None
 
     temps, codes, tps, humidities, winds = [], [], [], [], []
-    rain_hours, peak_rain_code = [], 0
+    rain_hours = []
 
     for w in weather_list:
         try:
@@ -27,57 +56,54 @@ def analyze_weather(weather_list):
             tp = float(w.get('tp', 0))
             hu = float(w.get('hu', 50))
             ws = float(w.get('ws', 0))
-
-            temps.append(temp)
-            codes.append(code)
-            tps.append(tp)
-            humidities.append(hu)
-            winds.append(ws)
-
-            local_dt = w.get('local_datetime', '')
-            if local_dt and 60 <= code <= 82:
-                hour = int(local_dt.split(' ')[1].split(':')[0])
-                if 6 <= hour <= 21:
-                    rain_hours.append(hour)
-                if code > peak_rain_code:
-                    peak_rain_code = code
-        except (IndexError, ValueError, TypeError):
+        except (TypeError, ValueError):
+            # Satu baris rusak tidak boleh membuat seluruh insight hilang.
             continue
+
+        temps.append(temp)
+        codes.append(code)
+        tps.append(tp)
+        humidities.append(hu)
+        winds.append(ws)
+
+        hour = _hour_of(w)
+        if hour is not None and wt.is_wet(code) and 6 <= hour <= 21:
+            rain_hours.append(hour)
 
     if not temps:
         return None
 
-    max_temp = max(temps)
-    min_temp = min(temps)
-    avg_hu = sum(humidities) / len(humidities) if humidities else 50
-    max_wind = max(winds) if winds else 0
     total_precip = sum(tps)
 
     return {
-        'max_temp': max_temp,
-        'min_temp': min_temp,
-        'avg_hu': avg_hu,
-        'max_wind': max_wind,
+        'max_temp': max(temps),
+        'min_temp': min(temps),
+        'avg_hu': sum(humidities) / len(humidities),
+        'max_wind': max(winds),
         'total_precip': total_precip,
         'codes': codes,
-        'has_thunderstorm': any(c in WEATHER_CODE_GROUPS['thunderstorm'] for c in codes),
-        'has_rain': any(c in WEATHER_CODE_GROUPS['rain'] for c in codes),
-        'rain_heavy': any(c in WEATHER_CODE_GROUPS['heavy_rain'] for c in codes),
-        'rain_light': any(c in WEATHER_CODE_GROUPS['light_rain'] for c in codes),
-        'is_clear': all(c in WEATHER_CODE_GROUPS['clear'] for c in codes) and total_precip <= 0.01,
-        'is_cloudy': all(c in {0, 1, 2, 3, 4} for c in codes) and total_precip <= 0.1,
+        'has_thunderstorm': any(c in THUNDERSTORM_CODES for c in codes),
+        'has_rain': any(c in WET_CODES for c in codes),
+        'rain_heavy': any(c in HEAVY_RAIN_CODES for c in codes),
+        'rain_light': any(c in LIGHT_RAIN_CODES for c in codes),
+        'has_drizzle': any(c in DRIZZLE_CODES for c in codes),
+        'is_clear': all(c in CLEAR_SKY_CODES for c in codes) and total_precip <= 0.01,
+        'is_cloudy': all(c in NICE_SKY_CODES for c in codes) and total_precip <= 0.1,
         'rain_morning': any(6 <= h < 12 for h in rain_hours),
         'rain_afternoon': any(12 <= h < 17 for h in rain_hours),
         'rain_evening': any(17 <= h <= 21 for h in rain_hours),
         'rain_hours': rain_hours,
     }
 
+# Semua prefiks impersonal atau formal. Pool ini pernah mencampur "Insight
+# untuk Anda" dengan "Yang perlu kamu tahu", sehingga satu pesan yang sama bisa
+# terbaca formal atau santai tergantung undian — dan nada bot jadi tidak
+# konsisten antar-pengguna.
 PREFIXES = [
     "Saran hari ini:", "Insight untuk Anda:", "Catatan penting:",
     "Info kilat:", "Perhatian:", "Tips:", "Sekadar info:",
     "Pengingat:", "Yang perlu Anda ketahui:", "Catatan dari BMKG:",
 ]
-
 THUNDERSTORM_TEMPLATES = [
     "Hujan petir diprediksi hari ini. Jaga jarak dari pepohonan tinggi dan benda metal. Matikan perangkat elektronik yang tidak perlu saat hujan mulai turun.",
     "Ada potensi hujan disertai petir. Hindari area terbuka dan genangan air. Jika di luar ruangan, cari tempat berteduh yang aman — bukan di bawah pohon atau menara.",
@@ -179,6 +205,17 @@ HUMIDITY_LOW_TEMPLATES = [
     "Hari ini kering ({avg_hu:.0f}%). Cocok untuk jemur pakaian — cepat kering! Tapi kulit butuh pelembap tambahan.",
 ]
 
+#: Kode 50-57 (gerimis). Modul ini sebelumnya punya himpunan untuk kode ini di
+#: ``WEATHER_CODE_GROUPS``, tapi tidak punya template yang memakainya, sehingga
+#: gerimis jatuh ke DEFAULT_TEMPLATES dan berbunyi seperti tidak ada yang
+#: terjadi — sementara semua perintah lain menampilkan ❓.
+DRIZZLE_TEMPLATES = [
+    "Ada gerimis hari ini. Tetesannya kecil dan ringan, jadi payung besar biasanya tidak perlu — jaket tipis sudah cukup.",
+    "Gerimis turun tipis. Permukaan jalan tetap lembap dan licin, jadi tambah jarak pengereman.",
+    "Rembun dan gerimis di pagi hari. Bagus untuk jalan santai, tapi siapkan pakaian yang berlapis.",
+    "Gerimis ringan (±0.5 mm/jam). Bau tanah basah sebelum hujan. Payung lipatan di tas sudah cukup.",
+]
+
 HAZE_TEMPLATES = [
     "Kabut/asap mengurangi jarak pandang. Hati-hati berkendara — nyalakan lampu, jaga jarak aman, dan kurangi kecepatan.",
     "Visibilitas rendah karena kabut. Hindari perjalanan jauh jika tidak penting. Jika harus, gunakan fog lamp dan jangan menyalip.",
@@ -221,30 +258,21 @@ def pick_templates_until(pool, meta, max_total_chars=600):
     return chosen
 
 
-def generate_smart_insight(weather_list, max_insights=None):
-    meta = analyze_weather(weather_list)
-    if not meta:
-        return "Tidak ada data cuaca tersedia."
+def _select_pool(meta):
+    """Pilih (pool template, emoji aksen) untuk kondisi hari ini.
 
-    pref = random.choice(PREFIXES)
-    lines = []
-    is_short = max_insights == 1
-
+    Urutannya penting: petir mengalahkan hujan deras, hujan deras
+    mengalahkan hujan biasa, dan gerimis — yang kode 50-57-nya sudah
+    dipetakan di tabel cuaca — harus dicek sebelum "hujan ada" supaya tidak
+    dideskripsikan sebagai hujan biasa.
+    """
     if meta['has_thunderstorm']:
-        pool = THUNDERSTORM_TEMPLATES
-        emoji = "⚡"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
-    elif meta['rain_heavy']:
-        pool = RAIN_HEAVY_TEMPLATES
-        emoji = "⛈️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
-    elif meta['has_rain']:
+        return THUNDERSTORM_TEMPLATES, "⚡"
+    if meta['rain_heavy']:
+        return RAIN_HEAVY_TEMPLATES, "⛈️"
+    if meta['has_drizzle']:
+        return DRIZZLE_TEMPLATES, "🌦️"
+    if meta['has_rain']:
         rush = any(15 <= h <= 18 for h in meta['rain_hours'])
         if rush:
             pool = RAIN_RUSH_HOUR_TEMPLATES
@@ -254,42 +282,36 @@ def generate_smart_insight(weather_list, max_insights=None):
             pool = RAIN_AFTERNOON_TEMPLATES
         else:
             pool = RAIN_LIGHT_TEMPLATES
-        emoji = "🌧️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
-    elif meta['max_temp'] >= 34:
-        pool = HEAT_TEMPLATES
-        emoji = "☀️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
-    elif meta['is_clear']:
-        pool = CLEAR_TEMPLATES
-        emoji = "☀️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
-    elif meta['is_cloudy']:
-        pool = CLOUDY_TEMPLATES
-        emoji = "☁️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
+        return pool, "🌧️"
+    if meta['max_temp'] >= 34:
+        return HEAT_TEMPLATES, "☀️"
+    if meta['is_clear']:
+        # Codes 3 and 4 are "Berawan"/"Berawan Tebal" and are no longer part of
+        # the clear set, so an overcast day can no longer be described as
+        # "Hari cerah sempurna! Cocok untuk jemur pakaian".
+        return CLEAR_TEMPLATES, "☀️"
+    if meta['is_cloudy']:
+        return CLOUDY_TEMPLATES, "☁️"
+    return DEFAULT_TEMPLATES, "ℹ️"
+
+
+def generate_smart_insight(weather_list, max_insights=None):
+    meta = analyze_weather(weather_list)
+    if not meta:
+        return "Tidak ada data cuaca tersedia."
+
+    pref = random.choice(PREFIXES)
+    lines = []
+    is_short = max_insights == 1
+
+    pool, emoji = _select_pool(meta)
+    if is_short:
+        lines.append(random.choice(pool).format(**meta))
     else:
-        pool = DEFAULT_TEMPLATES
-        emoji = "ℹ️"
-        if is_short:
-            lines.append(random.choice(pool).format(**meta))
-        else:
-            lines.extend(pick_templates_until(pool, meta))
+        lines.extend(pick_templates_until(pool, meta))
 
     if not is_short:
-        has_haze = any(c in WEATHER_CODE_GROUPS['haze'] for c in meta['codes'])
+        has_haze = any(c in HAZE_CODES for c in meta['codes'])
         if has_haze:
             if meta['has_rain'] or meta['has_thunderstorm']:
                 lines.extend(pick_templates_until(HAZE_TEMPLATES, meta, max_total_chars=300))

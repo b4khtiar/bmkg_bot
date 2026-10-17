@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 
-from utils.constants import WEATHER_QUERY_MAP, IMAGE_WEATHER_GROUPS
+from utils import weather_table as wt
 
 logger = logging.getLogger(__name__)
 
@@ -17,23 +17,12 @@ _warned_missing_key = False
 
 def _resolve_condition_group(weather_code: str) -> str | None:
     """Map a raw BMKG weather code to a named condition group."""
-    if not weather_code:
-        return None
-    code_str = str(weather_code)
-    for group, codes in IMAGE_WEATHER_GROUPS.items():
-        try:
-            if int(code_str) in codes:
-                return group
-        except (ValueError, TypeError):
-            continue
-    return None
+    return wt.photo_group(weather_code)
 
 
 def _query_for_code(weather_code: str) -> str | None:
     """Return the Unsplash search query for a given weather code."""
-    if not weather_code:
-        return None
-    return WEATHER_QUERY_MAP.get(str(weather_code))
+    return wt.query_for(weather_code)
 
 
 def _warn_missing_key_once():

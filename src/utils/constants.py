@@ -56,84 +56,10 @@ def get_province_name(adm_code):
         return None
     return PROVINCE_MAP.get(adm_code[:2])
 
-WEATHER_CODES = {
-    "0": "Cerah ☀️",
-    "1": "Cerah Berawan 🌤️",
-    "2": "Cerah Berawan 🌤️",
-    "3": "Berawan ☁️",
-    "4": "Berawan Tebal ☁️",
-    "5": "Udara Kabur 🌫️",
-    "10": "Asap 💨",
-    "45": "Kabut 🌫️",
-    "60": "Hujan Ringan 🌧️",
-    "61": "Hujan Sedang 🌧️",
-    "62": "Hujan Sedang 🌧️",
-    "63": "Hujan Lebat ⛈️",
-    "64": "Hujan Deras ⛈️",
-    "65": "Hujan Sangat Deras ⛈️",
-    "66": "Hujan Beku Ringan 🌧️",
-    "67": "Hujan Beku Deras ⛈️",
-    "80": "Hujan Lokal 🌦️",
-    "81": "Hujan Sedang 🌦️",
-    "82": "Hujan Lebat 🌦️",
-    "95": "Hujan Petir ⛈️",
-    "96": "Hujan Petir ⛈️",
-    "97": "Hujan Petir ⛈️",
-}
 
-WEATHER_EMOJI = {
-    "0": "☀️", "1": "🌤️", "2": "🌤️", "3": "☁️", "4": "☁️",
-    "5": "🌫️", "10": "💨", "45": "🌫️",
-    "60": "🌧️", "61": "🌧️", "62": "🌧️",
-    "63": "⛈️", "64": "⛈️", "65": "⛈️",
-    "66": "🌧️", "67": "⛈️",
-    "80": "🌦️", "81": "🌦️", "82": "🌦️",
-    "95": "⛈️", "96": "⛈️", "97": "⛈️",
-}
+# Tabel kode cuaca (label, emoji, grup foto, pool insight) tidak lagi ada di
+# sini — semuanya diturunkan dari satu tabel di `utils/weather_table.py`.
+# WEATHER_CODES, WEATHER_EMOJI, dan IMAGE_WEATHER_GROUPS yang sebelumnya hidup
+# di file ini sudah dihapus; lihat modul tersebut.
 
 _VALID_BOT_MODES = {"OPEN", "WHITELIST", "MAINTENANCE"}
-
-# Groups for weather photo selection (Unsplash). Non-overlapping.
-IMAGE_WEATHER_GROUPS = {
-    "clear": {0, 1, 2},
-    "cloudy": {3, 4},
-    "foggy": {5, 10, 45},
-    "light_rain": {60, 61, 62, 80, 81},
-    "heavy_rain": {63, 64, 65, 66, 67, 82},
-    "thunderstorm": {95, 96, 97},
-}
-
-# Every code that counts as "wet". Derived so it can never drift from the
-# groups above — a hand-kept range once missed 95-97 and showed ☀️ on petir days.
-_RAIN_CODES = (
-    IMAGE_WEATHER_GROUPS["light_rain"]
-    | IMAGE_WEATHER_GROUPS["heavy_rain"]
-    | IMAGE_WEATHER_GROUPS["thunderstorm"]
-)
-
-# Per-code Unsplash search query. Codes sharing a group may use distinct
-# queries so the same broadcast never feels repetitive across conditions.
-WEATHER_QUERY_MAP = {
-    "0": "bright sunny blue sky",
-    "1": "sunny sky scattered clouds",
-    "2": "partly cloudy sunny day",
-    "3": "cloudy grey sky",
-    "4": "overcast dark clouds",
-    "5": "haze city skyline",
-    "10": "smoky haze sky",
-    "45": "foggy misty landscape morning",
-    "60": "light rain drops window",
-    "61": "rainy day umbrella street",
-    "62": "rain clouds grey sky",
-    "63": "heavy rain storm street",
-    "64": "tropical rain downpour",
-    "65": "flood rain storm",
-    "66": "cold rain frost",
-    "67": "freezing rain ice",
-    "80": "tropical rain shower",
-    "81": "rain shower umbrella",
-    "82": "rainstorm dark clouds",
-    "95": "thunderstorm lightning sky",
-    "96": "lightning storm dramatic clouds",
-    "97": "severe thunderstorm night",
-}
