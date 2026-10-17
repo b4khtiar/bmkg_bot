@@ -1,8 +1,13 @@
 import os
 import logging
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from database import set_bot_mode, get_bot_mode, add_to_whitelist, remove_from_whitelist, get_all_whitelisted, count_users
+from database import (
+    set_bot_mode, get_bot_mode, add_to_whitelist, remove_from_whitelist,
+    get_all_whitelisted, count_users, is_user_whitelisted,
+)
+from utils.text import esc
 from utils.keyboards import get_admin_panel_keyboard
 from utils.constants import _VALID_BOT_MODES
 
@@ -13,18 +18,31 @@ logger = logging.getLogger(__name__)
 @router.message(Command("admin"))
 async def cmd_admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        return
+        return await message.answer("⛔ Akses ditolak.", parse_mode="HTML")
 
     logger.info(f"Admin panel dibuka oleh {ADMIN_ID}")
+    await message.answer(
+        await _panel_text(),
+        reply_markup=get_admin_panel_keyboard(await get_bot_mode()),
+        parse_mode="HTML",
+    )
+
+
+async def _panel_text() -> str:
+    """Teks panel yang sama untuk tampilan awal dan setelah pergantian mode.
+
+    Sebelumnya setiap pergantian mode mengganti seluruh panel dengan dua baris
+    "Status Diubah ke: X", sehingga jumlah pengguna, daftar mode, dan
+    petunjuk hilang tanpa ada jalan kembali kecuali mengetik ulang /admin.
+    """
     current_mode = await get_bot_mode()
     user_count = await count_users()
-    text = (
-        "<b>🛠 CONTROL PANEL ADMIN</b>\n\n"
-        f"👥 Total User: {user_count}\n"
-        f"🤖 Mode: {current_mode}\n"
-        "Pilih mode di bawah untuk mengubah akses pengguna:"
+    return (
+        "🛠 <b>Panel Admin</b>\n\n"
+        f"👥 <b>Total pengguna</b>  {user_count}\n"
+        f"🤖 <b>Mode saat ini</b>  {esc(current_mode)}\n\n"
+        "Pilih mode di bawah untuk mengubah akses pengguna."
     )
-    await message.answer(text, reply_markup=get_admin_panel_keyboard(current_mode), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("setmode_"))
 async def handle_set_mode(callback: types.CallbackQuery):
@@ -42,15 +60,17 @@ async def handle_set_mode(callback: types.CallbackQuery):
 
     await set_bot_mode(new_mode)
 
-    text = (
-        "<b>🛠 CONTROL PANEL ADMIN</b>\n\n"
-        f"Status Bot Diubah ke: <b>{new_mode}</b>\n"
-    )
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_admin_panel_keyboard(new_mode),
-        parse_mode="HTML"
-    )
+    # Refresh the panel in place instead of replacing it with a stub, so the
+    # user count and the mode list stay visible.
+    try:
+        await callback.message.edit_text(
+            await _panel_text(),
+            reply_markup=get_admin_panel_keyboard(new_mode),
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            raise
     await callback.answer(f"✅ Mode diubah ke {new_mode}")
 
 @router.callback_query(F.data == "close_panel")
@@ -62,48 +82,86 @@ async def handle_close_panel(callback: types.CallbackQuery):
 @router.message(Command("whitelist"))
 async def cmd_whitelist(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        return
+        # Silent return here used to look like the bot ignored the command;
+        # the callback handlers already answer "Akses ditolak".
+        return await message.answer("⛔ Akses ditolak.", parse_mode="HTML")
 
     args = message.text.split()
     if len(args) < 2:
         whitelisted = await get_all_whitelisted()
-        text = "*Daftar Whitelist:*\n"
         if whitelisted:
-            for user in whitelisted:
-                username = user['username'] or "Tanpa username"
-                text += f"• `{user['chat_id']}` — {username}\n"
+            rows = "\n".join(
+                f"• <code>{user['chat_id']}</code> — {esc(user['username'] or 'Tanpa username')}"
+                for user in whitelisted
+            )
+            text = f"👥 <b>Whitelist</b> ({len(whitelisted)} pengguna)\n\n{rows}"
         else:
-            text += "Belum ada user yang ditambahkan ke whitelist."
+            text = "👥 <b>Whitelist</b>\n\nBelum ada pengguna yang ditambahkan."
 
-        text += "\n\nGunakan:\n`/whitelist [chat_id]` — tambah user\n`/whitelist remove [chat_id]` — hapus user"
-        await message.answer(text, parse_mode="Markdown")
+        text += (
+            "\n\n<b>Perintah:</b>\n"
+            "<code>/whitelist [chat_id]</code> — tambah pengguna\n"
+            "<code>/whitelist force [chat_id]</code> — tambah tanpa verifikasi\n"
+            "<code>/whitelist remove [chat_id]</code> — hapus pengguna"
+        )
+        await message.answer(text, parse_mode="HTML")
         return
 
     if args[1] == "remove" and len(args) >= 3:
         chat_id_str = args[2]
         if not _validate_chat_id(chat_id_str):
-            return await message.answer("❌ Chat ID harus berupa angka valid.", parse_mode="Markdown")
+            return await message.answer(
+                "❌ Chat ID harus berupa angka valid.", parse_mode="HTML"
+            )
         chat_id = int(chat_id_str)
+        # Report what actually happened. Reporting success unconditionally
+        # makes a typo'd ID look like it worked.
+        was_present = await is_user_whitelisted(chat_id)
         await remove_from_whitelist(chat_id)
-        await message.answer(f"✅ User *{chat_id}* berhasil dihapus dari whitelist.", parse_mode="Markdown")
-        return
+        if was_present:
+            return await message.answer(
+                f"✅ User <code>{chat_id}</code> dihapus dari whitelist.", parse_mode="HTML"
+            )
+        return await message.answer(
+            f"ℹ️ User <code>{chat_id}</code> tidak ada di whitelist.", parse_mode="HTML"
+        )
 
-    chat_id_str = args[1]
+    # `force` is advertised in the "unknown user" message below, so it has to
+    # actually work. Previously it fell through to the add path and "force" was
+    # then validated as a chat_id, producing a confusing error.
+    force = args[1] == "force"
+    if force and len(args) < 3:
+        # Length is checked before the second index is read; bare "force" used
+        # to raise an unhandled IndexError.
+        return await message.answer(
+            "❌ Format salah.\nGunakan: <code>/whitelist force [chat_id]</code>",
+            parse_mode="HTML",
+        )
+    chat_id_str = args[2] if force else args[1]
+
     if not _validate_chat_id(chat_id_str):
-        await message.answer("❌ Chat ID harus berupa angka valid.\nGunakan: `/whitelist [chat_id]`", parse_mode="Markdown")
-        return
+        return await message.answer(
+            "❌ Chat ID harus berupa angka valid.\n"
+            "Gunakan: <code>/whitelist [chat_id]</code>",
+            parse_mode="HTML",
+        )
 
     chat_id = int(chat_id_str)
 
-    # Verify user exists
     from database import get_user_info
     user_exists = await get_user_info(chat_id)
-    if not user_exists:
-        await message.answer(f"⚠️ Pengguna *{chat_id}* belum pernah menggunakan bot ini. Tambahkan ke whitelist? Gunakan `/whitelist force [chat_id]`.", parse_mode="Markdown")
-        return
+    if not user_exists and not force:
+        return await message.answer(
+            f"⚠️ Pengguna <code>{chat_id}</code> belum pernah menggunakan bot ini.\n"
+            "Tambahkan paksa dengan <code>/whitelist force [chat_id]</code>.",
+            parse_mode="HTML",
+        )
 
     await add_to_whitelist(chat_id)
-    await message.answer(f"✅ User *{chat_id}* berhasil ditambahkan ke whitelist.", parse_mode="Markdown")
+    await message.answer(
+        f"✅ User <code>{chat_id}</code> berhasil ditambahkan ke whitelist.",
+        parse_mode="HTML",
+    )
 
 
 def _validate_chat_id(chat_id_str: str) -> bool:

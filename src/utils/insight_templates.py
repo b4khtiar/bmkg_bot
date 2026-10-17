@@ -75,7 +75,7 @@ def analyze_weather(weather_list):
 PREFIXES = [
     "Saran hari ini:", "Insight untuk Anda:", "Catatan penting:",
     "Info kilat:", "Perhatian:", "Tips:", "Sekadar info:",
-    "Pengingat:", "Yang perlu kamu tahu:", "Catatan dari BMKG:",
+    "Pengingat:", "Yang perlu Anda ketahui:", "Catatan dari BMKG:",
 ]
 
 THUNDERSTORM_TEMPLATES = [

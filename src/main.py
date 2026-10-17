@@ -14,11 +14,13 @@ from services.bmkg_api import (
 )
 from database import (
     init_db, get_metadata, update_metadata, check_and_update_alert,
-    cleanup_old_alerts, get_users_with_pref, get_user_info, close_db, get_db,
+    cleanup_old_alerts, get_users_with_pref, close_db, get_db,
     enqueue_failed_send, retry_pending_sends, delete_pending_send,
     increment_retry_count,
 )
 from utils.constants import get_province_name
+from utils.design import CAPTION_LIMIT
+from utils.formatters import format_quake, format_nowcast_alert
 from logging_config import setup_logging
 from alerts import (
     send_admin_alert, record_bmkg_failure, record_bmkg_success,
@@ -50,7 +52,22 @@ MAX_SEND_RETRIES = 3
 
 
 async def _send_photo_sem(bot, chat_id, photo, caption):
+    """Send a photo, degrading to text-only if the caption cannot fit.
+
+    Telegram caps photo captions at 1024 chars and *rejects* anything longer
+    rather than trimming it. Before this guard, an over-length broadcast failed
+    here, got queued in ``pending_sends``, failed ``MAX_SEND_RETRIES`` times and
+    was dropped — while the admin summary still reported the send as fine,
+    because the failure lived in the Telegram layer, not the broadcast layer.
+    """
     async with _SEND_SEM:
+        if len(caption) > CAPTION_LIMIT:
+            logger.warning(
+                f"Caption {len(caption)} karakter melebihi batas {CAPTION_LIMIT}, "
+                "kirim sebagai teks",
+                extra={"chat_id": chat_id},
+            )
+            return await _send_text_locked(bot, chat_id, caption)
         try:
             await bot.send_photo(chat_id, photo=photo, caption=caption, parse_mode="HTML")
             return True
@@ -60,15 +77,20 @@ async def _send_photo_sem(bot, chat_id, photo, caption):
             return False
 
 
+async def _send_text_locked(bot, chat_id, msg):
+    """Send text assuming ``_SEND_SEM`` is already held."""
+    try:
+        await bot.send_message(chat_id, msg, parse_mode="HTML")
+        return True
+    except Exception as e:
+        logger.warning(f"Gagal kirim pesan ke {chat_id}: {e}", extra={"chat_id": chat_id})
+        await enqueue_failed_send(chat_id, msg)
+        return False
+
+
 async def _send_msg_sem(bot, chat_id, msg):
     async with _SEND_SEM:
-        try:
-            await bot.send_message(chat_id, msg, parse_mode="HTML")
-            return True
-        except Exception as e:
-            logger.warning(f"Gagal kirim pesan ke {chat_id}: {e}", extra={"chat_id": chat_id})
-            await enqueue_failed_send(chat_id, msg)
-            return False
+        return await _send_text_locked(bot, chat_id, msg)
 
 
 async def retry_failed_sends_job(bot):
@@ -113,7 +135,16 @@ async def _retry_send(bot, send_id, chat_id, photo_url, caption):
     """Attempt to resend a photo message. Returns True if sent."""
     try:
         async with _SEND_SEM:
-            await bot.send_photo(chat_id, photo=photo_url, caption=caption, parse_mode="HTML")
+            if len(caption) > CAPTION_LIMIT:
+                # Rows queued before the length guard existed would otherwise
+                # fail identically three times and be dropped.
+                logger.warning(
+                    f"Caption {len(caption)} karakter melebihi batas pada retry "
+                    f"ke {chat_id}, kirim sebagai teks"
+                )
+                await bot.send_message(chat_id, caption, parse_mode="HTML")
+            else:
+                await bot.send_photo(chat_id, photo=photo_url, caption=caption, parse_mode="HTML")
         await delete_pending_send(send_id)
         return True
     except Exception as e:
@@ -140,8 +171,8 @@ async def check_quake_job(bot):
         if failed:
             await send_admin_alert(
                 bot,
-                f"BMKG gempa API gagal fetch berulang (3x). Bot tidak dapat memantau gempa. "
-                f"Circuit breaker terbuka untuk endpoint ini.",
+                "BMKG gempa API gagal fetch berulang (3x). Bot tidak dapat memantau gempa. "
+                "Circuit breaker terbuka untuk endpoint ini.",
                 severity="CRITICAL"
             )
         return
@@ -154,22 +185,8 @@ async def check_quake_job(bot):
     if current_id != last_id:
         await update_metadata("last_quake_id", current_id)
 
-        wilayah = data['Wilayah'].replace("Pusat gempa berada di ", "")
-        posisi = wilayah.split(" ")[0]
-        lokasi_singkat = " ".join(wilayah.split(" ")[1:])
-
         users = await get_users_with_pref("notify_quake")
-        msg = (
-            "<b>🚨 GEMPA TERKINI</b>\n"
-            "━━━━━━━━━━━━━━\n"
-            f"🫨 <b>Magnitudo</b>: <code>{data['Magnitude']}</code>\n"
-            f"📏 <b>Kedalaman</b>: <code>{data['Kedalaman']}</code> ({posisi})\n"
-            f"📍 <b>Lokasi</b>: {lokasi_singkat}\n"
-            f"🏘️ <b>Terasa di</b>: {data['Dirasakan']}\n\n"
-            f"📅 {data['Tanggal']} | {data['Jam']}\n\n"
-            f"⚠️ <i>{data['Potensi']}</i>\n"
-            "━━━━━━━━━━━━━━"
-        )
+        msg = format_quake(data)
         img_url = f"https://cdn.bmkg.go.id/{data['Shakemap']}"
 
         results = await asyncio.gather(*[
@@ -224,11 +241,16 @@ async def daily_weather_job(bot, time_label):
             # ponytail: silent skip made broadcasts report "0 gagal" while users got nothing.
             # Fallback message keeps counts honest and users informed.
             if not adm_code:
-                fallback = "⚙️ Atur lokasi Anda dulu via /atur_notif untuk menerima update cuaca."
+                # Was pointing at /atur_notif, which only toggles notifications —
+                # it cannot set a location, so this was a dead end.
+                fallback = "⚙️ Lokasi Anda belum diatur, jadi cuaca tidak bisa dikirim.\nAtur lokasi dengan /lokasi."
             else:
+                # Do not suggest /cuaca: it hits the same BMKG endpoint that just
+                # failed, so the advice cannot help while the outage lasts.
                 fallback = (
                     f"⚠️ Data cuaca ({time_label}) sedang tidak tersedia untuk lokasi Anda.\n"
-                    f"Coba /cuaca untuk data terkini."
+                    "BMKG sedang tidak dapat dihubungi. Data akan dikirim otomatis "
+                    "ketika koneksi pulih."
                 )
             tasks.append(_send_msg_sem(bot, user_row['chat_id'], fallback))
             continue
@@ -238,7 +260,6 @@ async def daily_weather_job(bot, time_label):
             tasks.append(_send_photo_sem(bot, user_row['chat_id'], photo_url, text))
         else:
             tasks.append(_send_msg_sem(bot, user_row['chat_id'], text))
-
     results = await asyncio.gather(*tasks) if tasks else []
     success = sum(1 for r in results if r)
     failed = len(results) - success
@@ -287,8 +308,8 @@ async def nowcast_alert_job(bot):
         if failed:
             await send_admin_alert(
                 bot,
-                f"BMKG nowcast RSS fetch gagal berulang (3x). "
-                f"Peringatan dini cuaca tidak dapat diperbarui.",
+                "BMKG nowcast RSS fetch gagal berulang (3x). "
+                "Peringatan dini cuaca tidak dapat diperbarui.",
                 severity="WARNING"
             )
         return
@@ -331,26 +352,7 @@ async def nowcast_alert_job(bot):
                     continue
 
                 unique_img = f"{alert['image']}?t={session_ts}" if alert.get('image') else None
-
-                sub_list = alert.get('sub_districts', '').split(", ")
-                short_sub = ", ".join(sub_list[:5]) + "..." if len(sub_list) > 5 else alert.get('sub_districts', '')
-
-                impact_bullets = "\n".join([f"• {i.strip()}" for i in alert.get('impacts', [])])
-                advice_bullets = "\n".join([f"• {a.strip()}" for a in alert.get('advice', [])])
-
-                msg = (
-                    "🚨 <b>PERINGATAN DINI CUACA</b>\n"
-                    "━━━━━━━━━━━━━━\n"
-                    f"<b>Status:</b> {alert.get('severity', 'N/A')}\n"
-                    f"<b>Waktu:</b> {alert.get('effective', '?')} - {alert.get('expires', '?')}\n"
-                    f"<b>Cakupan:</b> {alert.get('province', 'N/A')}\n\n"
-                    f"<b>Peringatan:</b>\n{alert.get('event', 'N/A')}\n\n"
-                    f"<b>Potensi Dampak:</b>\n{impact_bullets}\n\n"
-                    f"<b>Saran Keselamatan:</b>\n{advice_bullets}\n\n"
-                    f"<b>Wilayah Terdampak:</b>\n{short_sub}\n\n"
-                    f"<i>Sumber: BMKG</i>\n"
-                    "━━━━━━━━━━━━━━\n"
-                )
+                msg = format_nowcast_alert(alert)
 
                 if unique_img:
                     tasks.append(_send_photo_sem(bot, user_row['chat_id'], unique_img, msg))
@@ -428,6 +430,7 @@ async def shutdown():
     await close_db()
     await close_http_client()
     logger.info("Koneksi database dan HTTP ditutup.")
+
 
 
 async def main():
