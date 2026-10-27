@@ -42,10 +42,11 @@ podman-compose build && podman-compose up -d
 | `src/services/unsplash_client.py` | Unsplash photo fetch by weather condition group; caches by group (memory + SQLite, 6h TTL) |
 | `src/handlers/user.py` | User commands: `/start`, `/cuaca`, `/prakiraan`, `/per_jam` (alias `/cuaca_hari_ini`), `/gempa`, `/nowcast`, `/lokasi`, `/notifikasi` (alias `/atur_notif`), `/bantuan`, `/ping` |
 | `src/handlers/admin.py` | Admin commands: `/admin` (panel), `/whitelist` (validated) |
-| `src/utils/constants.py` | `REGION_DATA`, `PROVINCE_MAP`, `_VALID_BOT_MODES` |
-| `src/utils/locations.py` | `/cuaca <lokasi>` resolver: name → adm4 via match ladder (exact → village → substring → reordered → district); `label_for()` validates `wxloc_` callbacks against the library |
+| `src/utils/constants.py` | Re-exports `REGION_DATA` from `src/utils/regions/`; `PROVINCE_MAP`, `_VALID_BOT_MODES` |
+| `src/utils/regions/*.py` | Region data: one module per province (all six Java provinces, ~25k adm4 → `Kab./Kota` labels, Kepmendagri 2022 edition), merged in `__init__.py` (DIY first) |
+| `src/utils/locations.py` | `/cuaca <lokasi>` resolver: name → adm4 via match ladder (exact → village → substring → reordered → district; exact tiers precomputed O(1) at import); `label_for()` validates `wxloc_`/`setloc_` callbacks against the library |
 | `src/utils/weather_table.py` | Single source of truth for BMKG weather codes (`WEATHER_CONDITIONS`) + derived sets |
-| `src/utils/keyboards.py` | Inline keyboard builders (with 64-byte callback_data assertions) |
+| `src/utils/keyboards.py` | Inline keyboard builders (with 64-byte callback_data assertions); `regency_map()` derives kab/kota grouping from `adm4[:5]` |
 | `src/utils/insight_templates.py` | Smart weather insight text generation |
 | `src/utils/text.py` | HTML escaping, `fmt_temp`/`fmt_hum`/`fmt_wind`, `MISSING` (`—`) |
 | `src/utils/design.py` | `compose()` — caption budget, photo-credit rule, truncation order, `severity_note()` |
@@ -78,6 +79,7 @@ python src/main.py
 - **Adding a user command**: import in `src/handlers/user.py`, route via `@router.message(Command(...))`. No registration needed in `main.py` — it already `include_router(user.router)`.
 - **Adding an admin command**: same pattern in `src/handlers/admin.py`.
 - **Tests**: `python -m pytest` (config in `pytest.ini`, `pythonpath = src tests`). No network calls. `tests/aiogram_stub.py` installs a stub aiogram only when the real package is missing (it pins `aiogram==3.28.2`, which the sandbox index could not serve) — enough to exercise handlers and broadcasts, not a Telegram simulation. Fixtures in `tests/fixtures/bmkg.py` are deliberately oversized.
+- **Region dev scripts** (`scripts/`, dev-only, never touched by pytest): `generate_regions.py` rebuilds the province data modules from a public Kepmendagri mirror JSON (`regency.json` + `village.json`); `validate_regions.py` live-checks adm4 codes against BMKG with pacing (≤60 req/min) and multi-window retry — a suspect must fail in *every* window to be reported as a persistent hole (BMKG 404s flap across its twice-daily grid regeneration). Do not filter `REGION_DATA` from a single session.
 
 ## Gotchas
 

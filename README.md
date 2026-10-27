@@ -28,7 +28,7 @@ Bot Telegram untuk memantau data cuaca, gempa bumi, dan peringatan dini cuaca (n
 | `/per_jam` | Cuaca per jam untuk hari ini |
 | `/gempa` | Informasi gempa bumi terkini |
 | `/nowcast` | Peringatan dini cuaca (filter provinsi) |
-| `/lokasi` | Atur atau ubah lokasi |
+| `/lokasi` | Atur atau ubah lokasi — pemilih 3 lapis (provinsi → kab/kota → desa/kelurahan) |
 | `/notifikasi` | Atur jenis notifikasi yang diterima |
 | `/bantuan` | Daftar perintah |
 | `/ping` | Cek status bot |
@@ -56,6 +56,24 @@ Bot menganalisis data cuaca dari BMKG dan menghasilkan insight otomatis dengan 5
 - **Kelembapan Ekstrem** — Tips kenyamanan tubuh
 - **Tren Suhu** — Perbandingan suhu hari ini vs besok
 
+## Cakupan Wilayah
+
+Data wilayah (`src/utils/regions/`, satu modul per provinsi) memuat kode administrasi tingkat desa/kelurahan (adm4) untuk **seluruh provinsi Pulau Jawa**, sesuai Kepmendagri (kode wilayah administrasi tingkat IV — daftar yang sama dengan yang diminta API BMKG):
+
+| Provinsi | Desa/Kelurahan |
+|---|---|
+| DI Yogyakarta | 438 |
+| Banten | 1.552 |
+| DKI Jakarta | 267 |
+| Jawa Barat | 5.957 |
+| Jawa Tengah | 8.563 |
+| Jawa Timur | 8.494 |
+| **Total** | **25.271** |
+
+- Sumber kode: mirror publik Kepmendagri ([vermaysha/database-wilayah-indonesia](https://github.com/vermaysha/database-wilayah-indonesia), konversi dari [cahyadsn/wilayah](https://github.com/cahyadsn/wilayah)). Label mengikuti nama desa versi BMKG sendiri (`lokasi.desa`).
+- **Catatan lubang BMKG**: grid BMKG regenerate dua kali sehari, dan kode yang sama bisa 404 di satu jendela waktu lalu normal di jendela berikutnya. Bot tetap melayani kode mana pun di pustaka — kena lubang hanya menurunkan kualitas jawaban via jalur fallback data cadangan yang sudah ada.
+- Validasi live (dev-only, tidak dijalankan pytest): `python scripts/validate_regions.py --sample 400 --rate 50 --windows 3` — kode mencurigakan diulang lintas jendela waktu; hanya gagal di semua jendela yang dilaporkan sebagai lubang permanen.
+
 ## Struktur Proyek
 
 ```
@@ -70,7 +88,7 @@ bmkg-bot/
 │   ├── services/
 │   │   └── bmkg_api.py         # Fetcher & parser data BMKG API
 │   └── utils/
-│       ├── constants.py        # PROVINCE_MAP, REGION_DATA, mode bot
+│       ├── constants.py        # PROVINCE_MAP + re-export REGION_DATA dari utils/regions/
 │       ├── weather_table.py    # Tabel kode cuaca BMKG (satu sumber kebenaran)
 │       ├── keyboards.py        # Inline keyboard builder
 │       ├── text.py             # Escaping & format nilai
