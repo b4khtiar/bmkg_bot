@@ -1,14 +1,9 @@
-# Struktur data wilayah (bisa kamu lengkapi sesuai kebutuhan)
-REGION_DATA = {
-    "DI Yogyakarta": {
-        "34.01.09.2001": "Jatimulyo, Kab. Kulon Progo",
-        "34.01.02.2001": "Wates, Kab. Kulon Progo",
-        "34.02.08.2003": "Bantul Kota, Kab. Bantul",
-        "34.04.12.2001": "Tridadi, Kab. Sleman",
-        "34.03.01.2001": "Wonosari, Kab. Gunung Kidul",
-        "34.71.04.1003": "Kota Yogyakarta"
-    }
-}
+# Struktur data wilayah dikelola di utils/regions/ (satu modul per provinsi,
+# lihat docstring paketnya untuk sumber kode wilayah). Re-export di sini supaya
+# seluruh konsumen tetap impor dari utils.constants seperti sebelumnya.
+from utils.regions import REGION_DATA
+
+__all__ = ["REGION_DATA", "PROVINCE_MAP", "get_province_name"]
 
 # Kode provinsi dari 2 digit pertama adm_code
 PROVINCE_MAP = {
