@@ -8,8 +8,9 @@ from database import (
     get_user_info, get_user_prefs, update_user_pref
 )
 from utils.keyboards import (
-    get_province_keyboard, get_city_keyboard, get_start_keyboard,
-    get_notif_prefs_keyboard, get_change_location_keyboard,
+    get_province_keyboard, get_regency_keyboard, get_desa_keyboard,
+    get_start_keyboard, get_notif_prefs_keyboard,
+    get_change_location_keyboard, regency_map,
     get_weather_location_choices,
 )
 from utils import locations
@@ -243,16 +244,105 @@ async def handle_cities(callback: types.CallbackQuery):
         callback,
         f"📍 <b>Pilih Kota/Kabupaten</b>\nWilayah: {esc(prov_name)}",
         parse_mode="HTML",
-        reply_markup=get_city_keyboard(prov_name)
+        reply_markup=get_regency_keyboard(prov_name)
+    )
+
+
+@router.callback_query(F.data.startswith("kabpage_"))
+async def handle_regency_page(callback: types.CallbackQuery):
+    """Halaman daftar kabupaten/kota untuk satu provinsi.
+
+    Bentuk callback: ``kabpage_<province>_<page>``. Satu callback alih-alih
+    menyimpan pesan terpisah yang harus diingat setiap saat — state tetap
+    berupa teks, jadi tombol tetap benar juga setelah restart bot.
+    """
+    await callback.answer()
+    try:
+        prov, page = callback.data.split("_", 1)[1].rsplit("_", 1)
+        page = int(page)
+    except (ValueError, IndexError):
+        return await callback.answer("Halaman tidak valid.", show_alert=True)
+
+    if not regency_map(prov):
+        return await callback.answer("Provinsi tidak dikenal.", show_alert=True)
+
+    await _safe_edit_text(
+        callback,
+        f"📍 <b>Pilih Kota/Kabupaten</b>\nWilayah: {esc(prov)}",
+        parse_mode="HTML",
+        reply_markup=get_regency_keyboard(prov, page)
+    )
+
+
+@router.callback_query(F.data.startswith("kabback_"))
+async def handle_regency_back(callback: types.CallbackQuery):
+    await callback.answer()
+    code = callback.data.split("_", 1)[1]
+    prov = get_province_name(code)
+    if not prov:
+        return await callback.answer("Wilayah tidak dikenal.", show_alert=True)
+
+    await _safe_edit_text(
+        callback,
+        f"📍 <b>Pilih Kota/Kabupaten</b>\nWilayah: {esc(prov)}",
+        parse_mode="HTML",
+        reply_markup=get_regency_keyboard(prov)
+    )
+
+
+@router.callback_query(F.data.startswith("kab_"))
+async def handle_desas(callback: types.CallbackQuery):
+    """Pilih desa: kabupaten/kota diturunkan dari lima digit pertama."""
+    await callback.answer()
+    code = callback.data.split("_", 1)[1]
+    prov = get_province_name(code)
+    if not prov or not regency_map(prov).get(code):
+        return await callback.answer("Wilayah tidak dikenal.", show_alert=True)
+
+    reg = regency_map(prov)[code]
+    await _safe_edit_text(
+        callback,
+        f"📍 <b>Pilih Desa/Kelurahan</b>\nWilayah: {esc(prov)} · {esc(reg)}",
+        parse_mode="HTML",
+        reply_markup=get_desa_keyboard(code)
+    )
+
+
+@router.callback_query(F.data.startswith("desapage_"))
+async def handle_desa_page(callback: types.CallbackQuery):
+    """Halaman daftar desa: ``desapage_<regency_code>_<page>``."""
+    await callback.answer()
+    try:
+        code, page = callback.data.split("_", 1)[1].rsplit("_", 1)
+        page = int(page)
+    except (ValueError, IndexError):
+        return await callback.answer("Halaman tidak valid.", show_alert=True)
+
+    prov = get_province_name(code)
+    reg = regency_map(prov).get(code) if prov else None
+    if reg is None:
+        return await callback.answer("Wilayah tidak dikenal.", show_alert=True)
+
+    await _safe_edit_text(
+        callback,
+        f"📍 <b>Pilih Desa/Kelurahan</b>\nWilayah: {esc(prov)} · {esc(reg)}",
+        parse_mode="HTML",
+        reply_markup=get_desa_keyboard(code, page)
     )
 
 
 @router.callback_query(F.data.startswith("setloc_"))
 async def handle_confirm_location(callback: types.CallbackQuery):
-    try:
-        _, adm_code, adm_name = callback.data.split("_", 2)
-    except ValueError:
-        return await callback.answer("Data lokasi tidak valid.", show_alert=True)
+    # Dua bentuk: ``setloc_<kode>`` (keyboard baru, kode-saja supaya selalu
+    # muat 64 byte) dan ``setloc_<kode>_<nama>`` (basi sebelum deploy ini).
+    # Label canonical selalu diambil kembali dari pustaka, bukan dari nama
+    # yang tertanam — satu sumber kebenaran, dan kode yang tidak dikenal
+    # ditolak.
+    parts = callback.data.split("_", 2)
+    adm_code = parts[1] if len(parts) > 1 else ""
+    adm_name = locations.label_for(adm_code)
+    if adm_name is None:
+        return await callback.answer("Lokasi tidak dikenal.", show_alert=True)
 
     await update_user_location(callback.from_user.id, adm_code, adm_name)
     await callback.answer(f"✅ Lokasi diatur ke {adm_name}")

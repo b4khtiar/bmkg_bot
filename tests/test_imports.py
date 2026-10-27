@@ -33,6 +33,11 @@ class TestUserRouter:
             "handle_cities",
             "handle_confirm_location",
             "handle_notif_toggle",
+            "handle_regency_page",
+            "handle_regency_back",
+            "handle_desas",
+            "handle_desa_page",
+            "handle_weather_location_choice",
         } <= names
 
     def test_legacy_hourly_command_still_works(self):

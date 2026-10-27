@@ -11,7 +11,7 @@ Bot Telegram untuk memantau data cuaca, gempa bumi, dan peringatan dini cuaca (n
 | 📅 **Prakiraan Cuaca Harian** | Notifikasi otomatis jam 06:30 (ringkasan 5 waktu) |
 | 🌤️ **Cuaca Sore** | Notifikasi cuaca jam terdekat jam 16:45 |
 | 💡 **Insight Cerdas** | Analisis cuaca otomatis: potensi hujan, panas ekstrem, angin kencang, tips aktivitas |
-| 📍 **Multi-lokasi** | Set lokasi per pengguna (provinsi → kota/kabupaten) |
+| 📍 **Multi-lokasi** | Set lokasi per pengguna (provinsi → kab/kota → desa/kelurahan) |
 | 🔔 **Preferensi Notifikasi** | Pilih jenis notifikasi yang diterima (gempa/cuaca/nowcast) |
 | 👥 **Multi-user** | Mendukung banyak pengguna dengan database terpisah |
 | 🛡️ **Mode Akses** | OPEN / WHITELIST / MAINTENANCE |

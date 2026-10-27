@@ -331,6 +331,129 @@ class TestCuacaArgument:
         assert any(t and "pemeliharaan" in t.lower() for t, _ in msg.replies)
 
 
+class TestLocationPickerHandlers:
+    """Alur tombol /lokasi tiga lapis: provinsi -> kab/kota -> desa -> setloc."""
+
+    @staticmethod
+    def _cb(data):
+        """CallbackQuery mini: edit_text dan toast terekam."""
+        from types import SimpleNamespace
+
+        class Msg:
+            def __init__(self):
+                self.chat = SimpleNamespace(id=1)
+                self.edits = []
+
+            async def edit_text(self, text=None, **kwargs):
+                self.edits.append((text, kwargs))
+                return self
+
+        class Cb:
+            def __init__(self, data):
+                self.data = data
+                self.message = Msg()
+                self.from_user = SimpleNamespace(id=1)
+                self.toasts = []
+
+            async def answer(self, text=None, show_alert=False):
+                self.toasts.append((text, show_alert))
+                return None
+
+        return Cb(data)
+
+    def test_prov_shows_regency_keyboard(self, db, monkeypatch):
+        cb = self._cb("prov_DI Yogyakarta")
+        asyncio.run(U.handle_cities(cb))
+        (text, kwargs), = cb.message.edits
+        assert "Pilih Kota/Kabupaten" in text
+        markup = kwargs["reply_markup"]
+        datas = [b.callback_data for row in markup["inline_keyboard"]
+                 for b in row]
+        assert set(datas) >= {
+            "kab_34.01", "kab_34.02", "kab_34.03", "kab_34.04", "kab_34.71"}
+
+    def test_kab_shows_desa_keyboard_with_header(self, db):
+        cb = self._cb("kab_34.01")
+        asyncio.run(U.handle_desas(cb))
+        (text, kwargs), = cb.message.edits
+        assert "Pilih Desa/Kelurahan" in text
+        assert "Kulon Progo" in text
+        datas = [b.callback_data for row in kwargs["reply_markup"]["inline_keyboard"]
+                 for b in row]
+        assert "setloc_34.01.09.2001" in datas
+
+    def test_kab_unknown_code_rejected(self, db):
+        cb = self._cb("kab_31.75")
+        asyncio.run(U.handle_desas(cb))
+        assert not cb.message.edits, "kode asing tidak boleh membuka picker"
+        assert any(t and "dikenal" in t for t, _ in cb.toasts)
+
+    def test_kabpage_valid(self, db):
+        cb = self._cb("kabpage_DI Yogyakarta_0")
+        asyncio.run(U.handle_regency_page(cb))
+        assert cb.message.edits
+        assert "Pilih Kota/Kabupaten" in cb.message.edits[0][0]
+
+    def test_kabpage_malformed_page_rejected(self, db):
+        cb = self._cb("kabpage_DI Yogyakarta_x")
+        asyncio.run(U.handle_regency_page(cb))
+        assert not cb.message.edits
+        assert any(t and "tidak valid" in t for t, _ in cb.toasts)
+
+    def test_kabpage_unknown_province_rejected(self, db):
+        cb = self._cb("kabpage_Imajiner_0")
+        asyncio.run(U.handle_regency_page(cb))
+        assert not cb.message.edits
+        assert any(t and "dikenal" in t for t, _ in cb.toasts)
+
+    def test_desapage_valid(self, db):
+        cb = self._cb("desapage_34.01_0")
+        asyncio.run(U.handle_desa_page(cb))
+        assert cb.message.edits
+        assert "Pilih Desa/Kelurahan" in cb.message.edits[0][0]
+
+    def test_desapage_unknown_rejected(self, db):
+        cb = self._cb("desapage_31.75_0")
+        asyncio.run(U.handle_desa_page(cb))
+        assert not cb.message.edits
+        assert any(t and "dikenal" in t for t, _ in cb.toasts)
+
+    def test_kabback_returns_to_regency_list(self, db):
+        cb = self._cb("kabback_34.01")
+        asyncio.run(U.handle_regency_back(cb))
+        (text, kwargs), = cb.message.edits
+        assert "Pilih Kota/Kabupaten" in text
+        assert any(b.callback_data == "kab_34.01"
+                   for row in kwargs["reply_markup"]["inline_keyboard"]
+                   for b in row)
+
+    def test_setloc_code_only_saves_library_label(self, db):
+        """Keyboard baru menyimpan kode saja; label diambil dari pustaka."""
+        cb = self._cb("setloc_34.01.02.2001")
+        asyncio.run(U.handle_confirm_location(cb))
+        assert db.location_updated == (
+            "34.01.02.2001", "Wates, Kab. Kulon Progo")
+        assert any(t and "Lokasi diatur" in t for t, _ in cb.toasts)
+        body = cb.message.edits[0][0]
+        assert "berhasil diatur" in body
+        assert "Wates, Kab. Kulon Progo" in body
+
+    def test_setloc_legacy_format_still_works(self, db):
+        """Keyboard yang sudah terlanjur di layar sebelum deploy ini masih
+        memuat nama setelah kode — harus tetap diterima."""
+        cb = self._cb("setloc_34.01.02.2001_Wates, Kab. Kulon Progo")
+        asyncio.run(U.handle_confirm_location(cb))
+        assert db.location_updated == (
+            "34.01.02.2001", "Wates, Kab. Kulon Progo")
+
+    def test_setloc_unknown_code_rejected_and_not_saved(self, db):
+        cb = self._cb("setloc_31.75.03.1001")
+        asyncio.run(U.handle_confirm_location(cb))
+        assert db.location_updated is None, "kode asing tidak boleh disimpan"
+        assert not cb.message.edits
+        assert any(t and "dikenal" in t for t, _ in cb.toasts)
+
+
 class TestHelpAndLocationCommands:
     def test_help_lists_new_command_names(self, db, sent):
         out, Recorder = sent

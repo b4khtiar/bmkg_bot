@@ -309,3 +309,124 @@ class TestWeatherLocationChoices:
     def test_empty_match_list_gives_empty_keyboard(self):
         markup = K.get_weather_location_choices([])
         assert markup["inline_keyboard"] == []
+
+
+class TestRegencyKeyboard:
+    """Lapis kedua pemilih lokasi: provinsi -> kabupaten/kota -> desa."""
+
+    def _buttons(self, markup):
+        return [b for row in markup["inline_keyboard"] for b in row]
+
+    def _data_buttons(self, markup):
+        return [b for b in self._buttons(markup)
+                if b.callback_data and not b.callback_data.startswith(
+                    ("kabpage_", "desapage_", "kabback_", "setup_location"))]
+
+    def test_labels_derived_from_desa_labels(self):
+        """'Tridadi, Kab. Sleman' harus tampil sebagai 'Kab. Sleman'."""
+        labels = {b.text for b in self._data_buttons(K.get_regency_keyboard(
+            "DI Yogyakarta"))}
+        assert labels == {
+            "Kab. Kulon Progo", "Kab. Bantul", "Kab. Gunung Kidul",
+            "Kab. Sleman", "Kota Yogyakarta",
+        }
+
+    def test_kota_prefix_grouped_by_code(self):
+        """'Kota Yogyakarta' tidak punya nama desa — labelnya berdiri sendiri,
+        dan dikelompokkan lewat 5 digit pertama, bukan teks label."""
+        buttons = self._data_buttons(K.get_desa_keyboard("34.71"))
+        assert [b.text for b in buttons] == ["Kota Yogyakarta"]
+        assert buttons[0].callback_data == "setloc_34.71.04.1003"
+
+    def test_paginated_when_many_regencies(self, monkeypatch):
+        """Jawa Timur punya 38 kabupaten/kota — harus dipagasi, bukan satu
+        dinding 38 baris."""
+        region = {
+            f"35.{i:02d}.01.2001": f"Desa X, Kab. R{i}" for i in range(1, 39)
+        }
+        monkeypatch.setattr(K, "REGION_DATA", {"Jawa Timur": region})
+
+        page0 = self._buttons(
+            K.get_regency_keyboard("Jawa Timur", 0))
+        texts = [b.text for b in page0]
+        assert "Kab. R1" in texts and "Kab. R10" in texts
+        assert "Kab. R11" not in texts
+        assert any("Berikutnya" in b.text for b in page0)
+
+        page3 = self._buttons(
+            K.get_regency_keyboard("Jawa Timur", 3))
+        assert any("Kab. R38" in b.text for b in page3)
+        assert not any("Berikutnya" in b.text for b in page3)
+
+    def test_back_to_provinces(self):
+        row = K.get_regency_keyboard("DI Yogyakarta")["inline_keyboard"][-1]
+        assert row[0].callback_data == "setup_location"
+        assert "Provinsi" in row[0].text
+
+    def test_unknown_province_is_empty_but_not_crash(self):
+        markup = K.get_regency_keyboard("Provinsi Imajiner")
+        assert markup["inline_keyboard"] == []
+
+
+class TestDesaKeyboard:
+    def _buttons(self, markup):
+        return [b for row in markup["inline_keyboard"] for b in row]
+
+    def _data_buttons(self, markup):
+        return [b for b in self._buttons(markup)
+                if b.callback_data and not b.callback_data.startswith(
+                    ("desapage_", "kabback_", "kabpage_", "setup_location"))]
+
+    def test_list_only_that_regency(self):
+        buttons = self._data_buttons(K.get_desa_keyboard("34.01"))
+        assert [b.text for b in buttons] == [
+            "Jatimulyo, Kab. Kulon Progo", "Wates, Kab. Kulon Progo"]
+        assert [b.callback_data for b in buttons] == [
+            "setloc_34.01.09.2001", "setloc_34.01.02.2001"]
+
+    def test_callback_data_is_code_only(self):
+        """setloc_<kode> = 22 byte; nama di belakang kode bisa mendekati atau
+        melampaui anggaran 64 byte Telegram."""
+        for b in self._data_buttons(K.get_desa_keyboard("34.01")):
+            assert b.callback_data.startswith("setloc_")
+            assert "_" not in b.callback_data[len("setloc_"):], b.callback_data
+            assert len(b.callback_data.encode("utf-8")) <= 64
+
+    def test_paginated_when_many_desas(self, monkeypatch):
+        """35 = Jawa Timur di PROVINCE_MAP; kabupaten pertama Jawa Barat
+        diawali 32.01."""
+        region = {
+            f"32.01.01.{2000 + i}": f"Desa{i}, Kab. X" for i in range(1, 26)
+        }
+        monkeypatch.setattr(K, "REGION_DATA", {"Jawa Barat": region})
+
+        page0 = self._data_buttons(K.get_desa_keyboard("32.01", 0))
+        texts = [b.text for b in page0]
+        assert "Desa1, Kab. X" in texts and "Desa10, Kab. X" in texts
+        assert "Desa11, Kab. X" not in texts
+        assert any("Berikutnya" in b.text for b in self._buttons(
+            K.get_desa_keyboard("32.01", 0)))
+
+        page2 = self._data_buttons(K.get_desa_keyboard("32.01", 2))
+        assert [b.text for b in page2] == [
+            f"Desa{i}, Kab. X" for i in range(21, 26)]
+        assert not any("Berikutnya" in b.text for b in self._buttons(
+            K.get_desa_keyboard("32.01", 2)))
+
+    def test_back_to_regency_list(self):
+        row = K.get_desa_keyboard("34.01")["inline_keyboard"][-1]
+        assert row[0].callback_data == "kabback_34.01"
+        assert "Kabupaten" in row[0].text
+
+    def test_unknown_regency_gives_empty_keyboard(self):
+        markup = K.get_desa_keyboard("99.99")
+        assert markup["inline_keyboard"] == []
+
+    def test_page_out_of_range_shows_first_page(self):
+        """Callback basi (halaman 9) tidak boleh membuat pengguna terjebak di
+        halaman kosong — di-clamp ke halaman yang berisi data."""
+        page9 = self._data_buttons(K.get_regency_keyboard("DI Yogyakarta", 9))
+        assert {b.text for b in page9} == {
+            "Kab. Kulon Progo", "Kab. Bantul", "Kab. Gunung Kidul",
+            "Kab. Sleman", "Kota Yogyakarta"}
+        assert len(self._data_buttons(K.get_desa_keyboard("34.71", 9))) == 1

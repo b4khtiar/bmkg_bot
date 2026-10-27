@@ -109,6 +109,7 @@ class InlineKeyboardBuilder:
     def __init__(self):
         self._items = []
         self._forced = set()
+        self._starts = set()
         self._rows = None
         self._width = 1
 
@@ -119,6 +120,11 @@ class InlineKeyboardBuilder:
         return b
 
     def row(self, *buttons, **k):
+        # row() memulai baris baru: di aiogram asli, pemanggilan row() setelah
+        # adjust() TIDAK menempelkan tombolnya ke baris sisa hasil adjust —
+        # misalnya 5 tombol data + row(back) = baris ke-3 berisi 1 tombol dan
+        # baris ke-4 berisi back, bukan [tombol5, back].
+        self._starts.add(len(self._items))
         for b in buttons:
             self._items.append(b)
         self._forced.add(len(self._items))
@@ -133,6 +139,9 @@ class InlineKeyboardBuilder:
         rows = []
         current = []
         for idx, b in enumerate(self._items):
+            if current and idx in self._starts:
+                rows.append(current)
+                current = []
             current.append(b)
             if (idx + 1) in self._forced or len(current) >= self._width:
                 rows.append(current)
