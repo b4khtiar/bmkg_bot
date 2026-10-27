@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import defusedxml.ElementTree as ET
 from utils import weather_table as wt
 from utils.insight_templates import generate_smart_insight, generate_trend_insight
-from utils.design import compose, severity_note
+from utils.design import compose, severity_note, severity_rank
 from utils.formatters import (
     location_label, weather_current, weather_daily_brief, weather_hourly,
     weather_multiday,
@@ -340,6 +340,20 @@ def parse_nowcast_rss(xml_string, user_city_name=None):
             
     return relevant_links
 
+def _iso_epoch(iso_text: str) -> int:
+    """``"2026-10-27T15:00:00+07:00"`` → epoch detik; gagal → ``0``.
+
+    Dipakai untuk urutan terbaru-dulu antar-peringatan CAP. Pengecualian
+    diserap di sini supaya satu field pelik tidak menggugurkan seluruh CAP.
+    Timestamp CAP selalu membawa zona, jadi ``timestamp()`` akurat; fallback 0
+    hanya menggeser urutan, bukan logika kirim.
+    """
+    try:
+        return int(datetime.fromisoformat(iso_text.strip()).timestamp())
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
 _RE_REGION = re.compile(r"sebagian wilayah (.*?), khususnya di (.*?)\. Kondisi")
 _RE_IMPACT = re.compile(r"berpotensi menimbulkan dampak berupa (.*?)\. Masyarakat")
 _RE_ADVICE = re.compile(r"dihimbau untuk (.*?)\. Kondisi diperkirakan")
@@ -412,11 +426,18 @@ def parse_cap_detail(xml_string):
         desc = parse_cap_description(description_text)
 
         identifier_el = root.find("cap:identifier", ns)
+        sent_el = root.find("cap:sent", ns)
         event_el = info.find("cap:event", ns)
         web_el = info.find("cap:web", ns)
 
+        # <sent> (waktu penerbitan) + peringkat severity: jumlah urutan
+        # terbaru-dulu antar item dan putusan eskalasi di nowcast_alert_job.
+        sent_text = sent_el.text if sent_el is not None else ""
+
         return {
             "id": identifier_el.text if identifier_el is not None else "",
+            "sent": _iso_epoch(sent_text),
+            "severity_rank": severity_rank(severity),
             "event": event_el.text if event_el is not None else "Peringatan Cuaca",
             "severity": severity_note_text,
             "severity_raw": severity,

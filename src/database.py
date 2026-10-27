@@ -1,6 +1,7 @@
 import aiosqlite
 import logging
 import json
+import time
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -160,20 +161,82 @@ async def update_metadata(key, value):
     await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
     await db.commit()
 
-async def check_and_update_alert(key_name, new_value):
+async def mark_alert_seen(key_name, ts=None):
+    """Tandai satu alert sudah terkirim; ``True`` hanya bila key belum ada.
+
+    Deterministik, beda dari pola sembanding-value lama
+    (``check_and_update_alert``): value-nya epoch penerbitan (bukan placeholder
+    ``"sent"``) supaya pembersih `cap_*` bisa cek umur key dari SQL — dan
+    status "sudah terkirim" tidak terbalik oleh perbedaan timestamp antara
+    panggilan kedua dan pertama. Pengecekan-penulisan berjalan sekuensial di
+    dalam job tunggal, tidak ada penelepon paralel.
+    """
     db = await get_db()
-    cursor = await db.execute("SELECT value FROM config WHERE key = ?", (key_name,))
+    cursor = await db.execute("SELECT 1 FROM config WHERE key = ?", (key_name,))
+    existing = await cursor.fetchone()
+    if existing:
+        return False
+    value = int(ts) if ts is not None else int(time.time())
+    await db.execute("INSERT INTO config (key, value) VALUES (?, ?)", (key_name, str(value)))
+    await db.commit()
+    return True
+
+def _parse_last_stamp(value):
+    """Value `'1730023200:2'` → `(1730023200, 2)`; tak terbaca → `None`."""
+    try:
+        ts_text, _, rank_text = str(value).partition(":")
+        rank = int(rank_text) if rank_text else 0
+        return int(ts_text), rank
+    except (ValueError, TypeError):
+        return None
+
+
+async def get_last_nowcast(chat_id, fingerprint):
+    """Terakhir nowcast yang dikirim ke chat untuk satu ``provinsi|event``.
+
+    Kembalikan ``(epoch terkirim, peringkat severity)`` atau ``None``.
+    Dipakai ``nowcast_alert_job``: peringatan ulang dalam jeda ditekan,
+    kecuali tingkatnya mengeskalasi.
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT value FROM config WHERE key = ?",
+        (f"cap_last_{chat_id}_{fingerprint}",),
+    )
     row = await cursor.fetchone()
-    old_value = row[0] if row else None
-    if old_value != str(new_value):
-        await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key_name, str(new_value)))
-        await db.commit()
-        return True
-    return False
+    if not row:
+        return None
+    return _parse_last_stamp(row[0])
+
+
+async def stamp_last_nowcast(chat_id, fingerprint, ts, rank):
+    """Catat epoch + tingkat severity terakhir yang dikirim untuk ``provinsi|event``."""
+    db = await get_db()
+    await db.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        (f"cap_last_{chat_id}_{fingerprint}", f"{int(ts)}:{int(rank)}"),
+    )
+    await db.commit()
+
+
+ALERT_KEY_TTL_DAYS = 7
+
 
 async def cleanup_old_alerts():
+    """Prune key alert `cap_*` lebih tua dari ``ALERT_KEY_TTL_DAYS``.
+
+    Dulu job ini menghapus SEMUA key `cap_*` Minggu 00:00 apa pun umurnya:
+    item RSS yang masih hidup setelah wipe langsung di-broadcast ulang ke
+    pengguna. Value kini diawali epoch (format `<epoch>:<rank>` atau epoch
+    polos), jadi umurnya bisa dicek dari SQL dengan CAST. Value legacy
+    `'sent'` ber-CAST-0 otomatis terpangkas, sekalian membersihkan format lama.
+    """
+    cutoff_ts = int(time.time() - ALERT_KEY_TTL_DAYS * 86400)
     db = await get_db()
-    await db.execute("DELETE FROM config WHERE key LIKE 'cap_%'")
+    await db.execute(
+        "DELETE FROM config WHERE key LIKE 'cap_%' AND CAST(value AS INTEGER) < ?",
+        (cutoff_ts,),
+    )
     await db.commit()
 
 async def get_user_prefs(chat_id):

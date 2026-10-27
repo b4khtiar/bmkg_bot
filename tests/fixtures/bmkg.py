@@ -72,6 +72,49 @@ def nowcast_rss(titles=("Peringatan Dini Cuaca DIY",), links=None):
     return NOWCAST_RSS.format(items=items)
 
 
+def cap_alert_xml(
+    identifier="2.49.0.1.360.0.2026.10.27.08.34.003",
+    sent="2026-10-27T15:00:00+07:00",
+    severity="Moderate",
+    event="Hujan Lebat dan Petir",
+    province="DI Yogyakarta",
+    effective="2026-10-27T15:10:00+07:00",
+    expires="2026-10-27T17:00:00+07:00",
+    image="https://nowcasting.bmkg.go.id/infografis/CYG/2026/10/27/infografis.jpg",
+    sub_districts="GIRIMULYO, NANGGULAN",
+):
+    """CAP XML peringatan dini cuaca, meniru struktur riil BMKG.
+
+    Deskripsi harus cocok dengan regex di ``parse_cap_description``:
+    "sebagian wilayah <prov>, khususnya di <desa>. Kondisi", "dampak berupa
+    <...>. Masyarakat", "dihimbau untuk <...>. Kondisi".
+    """
+    description = (
+        "Hujan lebat disertai petir akan terjadi pada 27 October 2026, "
+        f"15:10 WIB di sebagian wilayah {province}, khususnya di "
+        f"{sub_districts}. Kondisi ini berpotensi menimbulkan dampak berupa "
+        "jarak pandang berkurang, angin kencang. Masyarakat dihimbau untuk "
+        "tetap waspada, mengurangi aktivitas di luar ruangan. Kondisi "
+        "diperkirakan dapat berlangsung hingga 27 October 2026, 17:00 WIB."
+    )
+    return (
+        '<?xml version="1.0" ?>\n'
+        '<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">\n'
+        f"  <identifier>{identifier}</identifier>\n"
+        f"  <sent>{sent}</sent>\n"
+        "  <msgType>Alert</msgType>\n"
+        "  <info>\n"
+        f"    <severity>{severity}</severity>\n"
+        f"    <effective>{effective}</effective>\n"
+        f"    <expires>{expires}</expires>\n"
+        f"    <event>{event}</event>\n"
+        f"    <description>{description}</description>\n"
+        f"    <web>{image}</web>\n"
+        "  </info>\n"
+        "</alert>"
+    )
+
+
 def _slot(local_datetime, t, hu, ws, wd, weather, desc, tp=0):
     """Satu slot prakiraan, mengikuti field yang dipakai parser."""
     return {

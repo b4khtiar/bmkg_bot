@@ -15,7 +15,8 @@ from services.bmkg_api import (
     get_http_client,
 )
 from database import (
-    init_db, get_metadata, update_metadata, check_and_update_alert,
+    init_db, get_metadata, update_metadata, mark_alert_seen,
+    get_last_nowcast, stamp_last_nowcast,
     cleanup_old_alerts, get_users_with_pref, close_db, get_db,
     enqueue_failed_send, retry_pending_sends, delete_pending_send,
     increment_retry_count,
@@ -33,6 +34,18 @@ from health_server import start_health_server, stop_health_server, _set_checkers
 
 TZ = os.getenv("TZ", "Asia/Jakarta")
 ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
+
+# Jeda minimum antara dua nowcast dengan (provinsi, jenis peringatan) yang
+# sama dalam satu chat. BMKG menerbitkan ulang peringatan serupa sebagai CAP
+# BARU (file + identifier segar, coba lihat CYG...002 dan CYG...003 yang
+# hidup bareng di RSS) tiap siklus nowcast; tanpa jeda, bot mengirimi
+# pengguna peringatan "yang sama" berulang 30-120 menit sekali. Peringatan
+# yang MENGESKALASI (severity lebih tinggi dari terakhir dikirim) tetap lewat
+# meski jeda belum habis.
+try:
+    NOWCAST_COOLDOWN_MIN = int(os.getenv("NOWCAST_COOLDOWN_MIN", "60"))
+except ValueError:
+    NOWCAST_COOLDOWN_MIN = 60
 
 # Validate required env vars at startup
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -321,46 +334,95 @@ async def nowcast_alert_job(bot):
 
     try:
         users = await get_users_with_pref("notify_nowcast")
-        session_ts = int(time.time())
-        processed_alerts = {}
+        cooldown = NOWCAST_COOLDOWN_MIN * 60
 
-        tasks = []
+        # --- Fase kumpul: tiap detail CAP di-fetch + di-parse SEKALI per link
+        # unik, DI LUAR loop user. Struktur lama menaruh dedup `cap_<id>` di
+        # dalam loop user: user pertama urutan query menulis key global dan
+        # seluruh user lain di provinsi yang sama tidak pernah menerima
+        # peringatan itu. Parser pun menyimpan `sent` (epoch) supaya run
+        # dengan beberapa edisi provinsi yang sama sekaligus bisa memilih
+        # yang terbaru.
+        user_provinces = []
         for user_row in users:
-            adm_code = user_row['adm_code']
-            if not adm_code:
-                continue
-
-            province_name = get_province_name(adm_code)
+            province_name = get_province_name(user_row['adm_code'])
             if not province_name:
                 continue
+            user_provinces.append((user_row, province_name))
 
-            links = parse_nowcast_rss(rss_data, province_name)
+        unique_links = []
+        for _, province_name in user_provinces:
+            for link in parse_nowcast_rss(rss_data, province_name):
+                if link not in unique_links:
+                    unique_links.append(link)
 
-            for link in links:
-                if link not in processed_alerts:
-                    detail_xml = await fetch_alert_detail(link)
-                    if detail_xml:
-                        processed_alerts[link] = parse_cap_detail(detail_xml)
+        alerts_by_link = {}
+        for link in unique_links:
+            detail_xml = await fetch_alert_detail(link)
+            if not detail_xml:
+                continue
+            alert = parse_cap_detail(detail_xml)
+            if alert:
+                alerts_by_link[link] = alert
 
-                alert = processed_alerts.get(link)
-                if not alert:
+        tasks = []
+        for user_row, province_name in user_provinces:
+            chat_id = user_row['chat_id']
+            matching = [
+                a for a in alerts_by_link.values()
+                if province_name.lower() in a.get('province', '').lower()
+            ]
+            # Terbaru dulu, sehingga saat RSS menampung >1 edisi provinsi yang
+            # sama, yang terbaru yang lolos; edisi lebih tua ditandai
+            # sudah-lihat TANPA dikirim (mereka tidak boleh meledak setelah
+            # jeda habis, karena masih tertitip di RSS).
+            matching.sort(key=lambda a: a.get('sent', 0), reverse=True)
+
+            for alert in matching:
+                alert_id = alert.get('id', '')
+                if not alert_id:
+                    logger.warning(
+                        "CAP tanpa identifier dilewati: %s", alert.get('event'),
+                        extra={"chat_id": chat_id},
+                    )
                     continue
 
-                alert_province = alert.get('province', '')
-                if province_name.lower() not in alert_province.lower():
-                    continue
-
-                is_new = await check_and_update_alert(f"cap_{alert['id']}", "sent")
+                # Dedup persis per (chat, identifier) — value-nya epoch, bukan
+                # placeholder, supaya pembersih `cap_*` bisa menghitung umur key.
+                is_new = await mark_alert_seen(f"cap_{chat_id}_{alert_id}")
                 if not is_new:
                     continue
 
-                unique_img = f"{alert['image']}?t={session_ts}" if alert.get('image') else None
+                fp = f"{province_name}|{alert.get('event', '')}"
+                rank = alert.get('severity_rank', 0)
+                now_ts = int(time.time())
+
+                last = await get_last_nowcast(chat_id, fp)
+                if last:
+                    last_ts, last_rank = last
+                    age = now_ts - last_ts
+                    if age < cooldown and rank <= last_rank:
+                        logger.info(
+                            f"Nowcast ulang ditekan ({age // 60}/{NOWCAST_COOLDOWN_MIN} "
+                            f"menit, severity tidak eskalasi): {fp}",
+                            extra={"chat_id": chat_id},
+                        )
+                        continue
+                    if age < cooldown:
+                        logger.info(
+                            f"Nowcast eskalasi tetap dikirim (severity {last_rank}→{rank}): {fp}",
+                            extra={"chat_id": chat_id},
+                        )
+
+                await stamp_last_nowcast(chat_id, fp, now_ts, rank)
+
+                unique_img = f"{alert['image']}?t={now_ts}" if alert.get('image') else None
                 msg = format_nowcast_alert(alert)
 
                 if unique_img:
-                    tasks.append(_send_photo_sem(bot, user_row['chat_id'], unique_img, msg))
+                    tasks.append(_send_photo_sem(bot, chat_id, unique_img, msg))
                 else:
-                    tasks.append(_send_msg_sem(bot, user_row['chat_id'], msg))
+                    tasks.append(_send_msg_sem(bot, chat_id, msg))
 
         results = await asyncio.gather(*tasks) if tasks else []
         success = sum(1 for r in results if r)

@@ -47,12 +47,22 @@ SEVERITY_LABEL = {
 }
 SEVERITY_FALLBACK = ("ℹ️", "INFO")
 
+# Urutan tingkat keparahan untuk pembanding: peringatan ulang yang LEBIH
+# parah tetap boleh lewat meski jeda pengulangan nowcast belum habis.
+# Tidak ada di tabel (atau "Unknown") = 0, paling lemah.
+SEVERITY_RANK = {"Minor": 1, "Moderate": 2, "Severe": 3, "Extreme": 4}
+
 
 def severity_note(raw: str) -> str:
     """``"Moderate"`` → ``"🟠 WASPADA"``."""
     accent = SEVERITY_ACCENT.get(raw, SEVERITY_FALLBACK[0])
     label = SEVERITY_LABEL.get(raw, SEVERITY_FALLBACK[1])
     return f"{accent} {label}"
+
+
+def severity_rank(raw: str) -> int:
+    """``"Severe"`` → ``3``; tidak dikenal (termasuk ``"Unknown"``) → ``0``."""
+    return SEVERITY_RANK.get(raw, 0)
 
 
 def section(label: str) -> str:

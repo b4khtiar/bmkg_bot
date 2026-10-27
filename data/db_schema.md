@@ -19,6 +19,20 @@
 | key    | TEXT | Configuration key (Primary Key) |
 | value  | TEXT | Configuration value             |
 
+### Nowcast alert keys (prefix `cap_`)
+
+Dedup state for the nowcast broadcast job (`nowcast_alert_job`). All values
+start with an epoch second so the weekly cleanup can prune by **age** with
+`CAST(value AS INTEGER)` (see `cleanup_old_alerts`).
+
+| Key                          | Value             | Purpose                                                                 |
+| ---------------------------- | ----------------- | ----------------------------------------------------------------------- |
+| `cap_<chat_id>_<cap_id>`     | `<epoch>`         |Exact dedup per chat: this CAP identifier was already delivered          |
+| `cap_last_<chat_id>_<prov>\|<event>` | `<epoch>:<rank>` | Last alert sent per (chat, province+event); `rank` = severity rank (Minor 1 … Extreme 4) for the repeat cooldown (`NOWCAST_COOLDOWN_MIN`, default 60 min) and severity-escalation bypass |
+
+Legacy keys (`cap_<cap_id>` with value `"sent"`) from before the per-chat
+rework carry no epoch — `CAST` yields 0, so the first cleanup run removes them.
+
 ## user_prefs Table
 
 | Column         | Type    | Description                         |
