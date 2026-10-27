@@ -10,6 +10,7 @@ import asyncio
 import pytest
 
 import handlers.user as U
+from utils import keyboards as K
 from tests.aiogram_stub import Message, TelegramAPIError, TelegramBadRequest
 
 
@@ -158,37 +159,37 @@ class TestCuacaArgument:
     def test_argument_queries_that_location_by_code(self, db, sent, monkeypatch):
         stub = _WeatherStub(monkeypatch)
         out, Recorder = sent
-        asyncio.run(U.cmd_current_weather(Recorder("/cuaca Wates")))
-        assert stub.calls == ["34.01.02.2001"], "harus memakai kode adm4 pustaka"
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca pisangan baru")))
+        assert stub.calls == ["31.75.01.1001"], "harus memakai kode adm4 pustaka"
         assert any("CUACA SAAT INI" in t for t, _ in out)
 
     def test_argument_does_not_touch_saved_location(self, db, sent, monkeypatch):
         stub = _WeatherStub(monkeypatch)
         out, Recorder = sent
-        asyncio.run(U.cmd_current_weather(Recorder("/cuaca wonosari")))
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca pisangan baru")))
         assert stub.calls, "harus mem-fetch lokasi yang diketik"
         assert db.location_updated is None, "lokasi tersimpan tidak boleh berubah"
 
     def test_argument_works_without_saved_location(self, db, sent, monkeypatch):
-        """/cuaca wonosari tanpa lokasi tersimpan tetap menjawab, bukan
+        """/cuaca pisangan baru tanpa lokasi tersimpan tetap menjawab, bukan
         menampilkan pemilih lokasi."""
         stub = _WeatherStub(monkeypatch)
         out, Recorder = sent
-        asyncio.run(U.cmd_current_weather(Recorder("/cuaca wonosari")))
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca pisangan baru")))
         assert stub.calls, "argumen tidak boleh butuh lokasi tersimpan"
         assert not any("belum diatur" in t for t, _ in out)
 
     def test_botname_suffix_is_stripped_from_command(self, db, sent, monkeypatch):
-        """`/cuaca@BotName wates` tetap harus dikenali (bot di grup)."""
+        """`/cuaca@BotName pisangan baru` tetap harus dikenali (bot di grup)."""
         stub = _WeatherStub(monkeypatch)
         out, Recorder = sent
-        asyncio.run(U.cmd_current_weather(Recorder("/cuaca@CuacaBot wates")))
-        assert stub.calls == ["34.01.02.2001"]
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca@CuacaBot pisangan baru")))
+        assert stub.calls == ["31.75.01.1001"]
 
     def test_unknown_location_says_no_with_examples(self, db, sent, monkeypatch):
         stub = _WeatherStub(monkeypatch)
         out, Recorder = sent
-        asyncio.run(U.cmd_current_weather(Recorder("/cuaca jakarta")))
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca amsterdam")))
         assert not stub.calls, "lokasi di luar pustaka tidak boleh di-fetch"
         text = out[0][0]
         assert "tidak tersedia" in text.lower()
@@ -213,10 +214,10 @@ class TestCuacaArgument:
         assert markup is not None, "harus menawarkan tombol kandidat"
         buttons = [b for row in markup["inline_keyboard"] for b in row]
         datas = [b.callback_data for b in buttons]
-        assert set(datas) == {"wxloc_34.01.09.2001", "wxloc_34.01.02.2001"}
-        texts = [b.text for b in buttons]
-        assert "Jatimulyo, Kab. Kulon Progo" in texts
-        assert "Wates, Kab. Kulon Progo" in texts
+        assert len(datas) == K._MAX_LOCATION_CHOICES, "keyboard harus dibatasi"
+        assert all(d.startswith("wxloc_34.") for d in datas), datas
+        assert "…" in out[0][0] and "lainnya" in out[0][0], \
+            "teks harus menyinggung sisa kandidat yang tak dilist"
 
     def test_callback_sends_weather_and_clears_choices(self, db, sent, monkeypatch):
         from types import SimpleNamespace
@@ -286,7 +287,7 @@ class TestCuacaArgument:
                 return None
 
         msg = Msg()
-        cb = Cb("wxloc_31.75.03.1001", msg)
+        cb = Cb("wxloc_99.99.99.9999", msg)
         asyncio.run(U.handle_weather_location_choice(cb))
         assert not stub.calls, "kode asing tidak boleh diteruskan ke API"
         assert not msg.edits, "tidak ada konfirmasi untuk kode asing"
@@ -380,10 +381,10 @@ class TestLocationPickerHandlers:
         assert "Kulon Progo" in text
         datas = [b.callback_data for row in kwargs["reply_markup"]["inline_keyboard"]
                  for b in row]
-        assert "setloc_34.01.09.2001" in datas
+        assert "setloc_34.01.01.2001" in datas
 
     def test_kab_unknown_code_rejected(self, db):
-        cb = self._cb("kab_31.75")
+        cb = self._cb("kab_99.99")
         asyncio.run(U.handle_desas(cb))
         assert not cb.message.edits, "kode asing tidak boleh membuka picker"
         assert any(t and "dikenal" in t for t, _ in cb.toasts)
@@ -413,7 +414,7 @@ class TestLocationPickerHandlers:
         assert "Pilih Desa/Kelurahan" in cb.message.edits[0][0]
 
     def test_desapage_unknown_rejected(self, db):
-        cb = self._cb("desapage_31.75_0")
+        cb = self._cb("desapage_99.99_0")
         asyncio.run(U.handle_desa_page(cb))
         assert not cb.message.edits
         assert any(t and "dikenal" in t for t, _ in cb.toasts)
@@ -432,22 +433,22 @@ class TestLocationPickerHandlers:
         cb = self._cb("setloc_34.01.02.2001")
         asyncio.run(U.handle_confirm_location(cb))
         assert db.location_updated == (
-            "34.01.02.2001", "Wates, Kab. Kulon Progo")
+            "34.01.02.2001", "Karangwuni, Kab. Kulon Progo")
         assert any(t and "Lokasi diatur" in t for t, _ in cb.toasts)
         body = cb.message.edits[0][0]
         assert "berhasil diatur" in body
-        assert "Wates, Kab. Kulon Progo" in body
+        assert "Karangwuni, Kab. Kulon Progo" in body
 
     def test_setloc_legacy_format_still_works(self, db):
         """Keyboard yang sudah terlanjur di layar sebelum deploy ini masih
         memuat nama setelah kode — harus tetap diterima."""
-        cb = self._cb("setloc_34.01.02.2001_Wates, Kab. Kulon Progo")
+        cb = self._cb("setloc_34.01.02.2001_Karangwuni, Kab. Kulon Progo")
         asyncio.run(U.handle_confirm_location(cb))
         assert db.location_updated == (
-            "34.01.02.2001", "Wates, Kab. Kulon Progo")
+            "34.01.02.2001", "Karangwuni, Kab. Kulon Progo")
 
     def test_setloc_unknown_code_rejected_and_not_saved(self, db):
-        cb = self._cb("setloc_31.75.03.1001")
+        cb = self._cb("setloc_99.99.99.9999")
         asyncio.run(U.handle_confirm_location(cb))
         assert db.location_updated is None, "kode asing tidak boleh disimpan"
         assert not cb.message.edits

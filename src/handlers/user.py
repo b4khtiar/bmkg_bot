@@ -98,6 +98,10 @@ async def _safe_edit_text(callback: types.CallbackQuery, text: str, **kwargs):
 #: ada notifikasi".
 _ALLOWED_DURING_MAINTENANCE = {"start", "bantuan", "ping", "lokasi", "notifikasi"}
 
+#: Jumlah kandidat ambigu yang dilist di teks; sisanya diringkas jadi
+#: "…dan N lainnya". Tombol di keyboard sudah dibatasi _MAX_LOCATION_CHOICES.
+_AMBIGUOUS_SHOWN = 10
+
 
 def _command_name(message: types.Message) -> str:
     """Nama perintah yang diketik pengguna, tanpa '/' dan tanpa '@botname'."""
@@ -412,7 +416,7 @@ async def _send_current_weather(message: types.Message, adm_code: str) -> None:
 async def _cuaca_for_query(message: types.Message, query: str) -> None:
     """Cuaca saat ini untuk lokasi yang diketik, tanpa mengubah lokasi tersimpan.
 
-    Cakupan data wilayah baru DI Yogyakarta, jadi ketikan di luar pustaka tidak
+    Cakupan seluruh provinsi Pulau Jawa; ketikan di luar pustaka tidak
     ditebak-nebak melainkan ditolak dengan daftar contoh yang valid — sama
     seperti pemilih lokasi via /lokasi.
     """
@@ -433,7 +437,15 @@ async def _cuaca_for_query(message: types.Message, query: str) -> None:
         return
 
     if resolved["status"] == "ambiguous":
-        names = "\n".join(f"• {esc(m['label'])}" for m in resolved["matches"])
+        # Daftar kandidat dibatasi: nama desa yang sangat umum ("Karanganyar"
+        # dipakai 69 desa) bisa melahirkan ratusan kandidat — tanpa batas,
+        # balasan melewati batas 4096 karakter Telegram dan seluruh jawaban
+        # ditolak, bukan sekadar dipangkas.
+        shown = resolved["matches"][:_AMBIGUOUS_SHOWN]
+        hidden = len(resolved["matches"]) - len(shown)
+        names = "\n".join(f"• {esc(m['label'])}" for m in shown)
+        if hidden:
+            names += f"\n…dan {hidden} lainnya"
         await message.answer(
             "🏘️ <b>Beberapa lokasi cocok</b>\n\n"
             f"{names}\n\n"

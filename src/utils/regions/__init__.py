@@ -13,10 +13,21 @@ administrasi tingkat IV).
 """
 
 from utils.regions.diy import REGION_DATA as _DIY
+from utils.regions.banten import REGION_DATA as _BANTEN
+from utils.regions.dki import REGION_DATA as _DKI
+from utils.regions.jawa_barat import REGION_DATA as _JAWA_BARAT
+from utils.regions.jawa_tengah import REGION_DATA as _JAWA_TENGAH
+from utils.regions.jawa_timur import REGION_DATA as _JAWA_TIMUR
 
-#: Urutan gabungan — provinsi terdahulu dulu supaya (1) daftar contoh pada
-#: pesan "lokasi tidak tersedia" tetap menampilkan DIY, (2) peta provinsi
-#: pada picker stabil dan tidak acak.
+#: Urutan gabungan — DI Yogyakarta dulu supaya (1) daftar contoh pada pesan
+#: "lokasi tidak tersedia" tetap menampilkan contoh DIY seperti sebelum
+#: data Jawa masuk, (2) urutan provinsi pada picker stabil dan tidak acak.
+#: Sisanya alfabetis.
 REGION_DATA = {
     **_DIY,
+    **_BANTEN,
+    **_DKI,
+    **_JAWA_BARAT,
+    **_JAWA_TENGAH,
+    **_JAWA_TIMUR,
 }
