@@ -443,12 +443,27 @@ async def _cuaca_for_query(message: types.Message, query: str) -> None:
         # ditolak, bukan sekadar dipangkas.
         shown = resolved["matches"][:_AMBIGUOUS_SHOWN]
         hidden = len(resolved["matches"]) - len(shown)
-        names = "\n".join(f"• {esc(m['label'])}" for m in shown)
+
+        # Nama desa yang sama bisa hidup di beberapa provinsi ("Sukamaju" ada
+        # di Jawa Barat dan Banten) — kandidat itu diberi akhiran provinsinya
+        # supaya pengguna tahu mana yang dia maksud. Yang unik tetap polos.
+        provinces_of_village = {}
+        for m in resolved["matches"]:
+            provinces_of_village.setdefault(m["village"], set()).add(
+                m["province"])
+
+        names = []
+        for m in shown:
+            line = esc(m["label"])
+            if len(provinces_of_village.get(m["village"], ())) > 1:
+                line += f" — {esc(m['province'])}"
+            names.append(f"• {line}")
+        listing = "\n".join(names)
         if hidden:
-            names += f"\n…dan {hidden} lainnya"
+            listing += f"\n…dan {hidden} lainnya"
         await message.answer(
             "🏘️ <b>Beberapa lokasi cocok</b>\n\n"
-            f"{names}\n\n"
+            f"{listing}\n\n"
             "Pilih salah satu di bawah, atau ketik nama yang lebih spesifik.",
             parse_mode="HTML",
             reply_markup=get_weather_location_choices(resolved["matches"]),

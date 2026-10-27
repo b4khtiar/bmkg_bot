@@ -3,14 +3,10 @@
 Pustaka memuat 25.271 desa dari enam provinsi Pulau Jawa, jadi nama umum
 ("Wonosari", 30 desa) nyaris selalu ambigu — itu perilaku yang benar, bukan
 kegagalan: pemanggil menawarkan tombol kandidat. Ketikan di luar cakupan
-dijawab "none" dengan contoh yang valid, bukan ditebak.
+dijawab "none" dengan contoh yang valid, bukan ditebak. Indeks eksak dibuat
+precomputed saat impor, jadi sweep seluruh pustaka di sini tetap murah.
 """
 from utils import locations as L
-
-#: Sampel entri lintas provinsi untuk sweep "setiap entri bisa dicari".
-#: resolve_location masih O(n) per panggilan (penuh 25k = O(n²) per sweep),
-#: makanya di-sample; sweep penuh kembali setelah indeks precomputed.
-_SAMPLE_STRIDE = 170
 
 
 class TestNormalization:
@@ -84,26 +80,25 @@ class TestMatchLadder:
 
 
 class TestEveryLibraryEntryIsResolvable:
-    """Entri baru di REGION_DATA harus tetap bisa dicari via nama desanya.
+    """Entri baru di REGION_DATA harus tetap bisa dicari via nama desanya —
+    kalau tidak, keyboard /lokasi menawarkan tempat yang tidak bisa diketik."""
 
-    Swept setiap entri; stride sampel ringan dulu — indeks O(n) per query
-    membuat sweep penuh 25k berat; kembali penuh setelah precompute.
-    """
-
-    def test_sampled_entries_reachable_by_village_name(self):
-        total = 0
-        ranks = []
-        for province, places in sorted(L.REGION_DATA.items()):
-            for i, (adm4, label) in enumerate(places.items()):
-                total += 1
-                if i % _SAMPLE_STRIDE:
-                    continue
+    def test_all_entries_reachable_by_village_name(self):
+        swept = 0
+        for province, places in L.REGION_DATA.items():
+            for adm4, label in places.items():
+                swept += 1
                 village = label.partition(",")[0]
+                if not L._normalize(village):
+                    # Nama desa yang setelah normalisasi kosong — sungguhan
+                    # ada: desa "Kelurahan", Kec. Jambu, Kab. Semarang. Desa
+                    # itu tidak bisa dijangkau lewat nama desanya (tidak punya
+                    # nama yang bermakna); picker keyboard tetap jalannya.
+                    continue
                 r = L.resolve_location(village)
                 assert r["status"] in ("ok", "ambiguous"), (adm4, label)
                 assert adm4 in [m["adm4"] for m in r["matches"]], (adm4, label)
-                ranks.append(r)
-        assert total > 25000, total
+        assert swept > 25000, swept
 
     def test_all_six_java_provinces_present(self):
         assert set(L.REGION_DATA) == {

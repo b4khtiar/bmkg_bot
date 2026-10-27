@@ -219,6 +219,30 @@ class TestCuacaArgument:
         assert "…" in out[0][0] and "lainnya" in out[0][0], \
             "teks harus menyinggung sisa kandidat yang tak dilist"
 
+    def test_ambiguous_across_provinces_gets_suffix(self, db, sent, monkeypatch):
+        """'Sukamaju' hidup di Jawa Barat DAN Banten — kandidat yang
+        berbagi nama lintas provinsi diberi akhiran provinsinya."""
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca sukamaju")))
+        assert not stub.calls, "ambigu tidak boleh dipilih secara diam-diam"
+        text = out[0][0]
+        assert "Jawa Barat" in text and "Banten" in text, text
+
+    def test_pathological_common_name_stays_under_telegram_limit(self, db, sent, monkeypatch):
+        """'Karanganyar' dipakai 69 desa: teks tetap di bawah 4096 karakter,
+        sisanya diringkas, dan keyboard tetap dibatasi 10 tombol."""
+        stub = _WeatherStub(monkeypatch)
+        out, Recorder = sent
+        asyncio.run(U.cmd_current_weather(Recorder("/cuaca karanganyar")))
+        assert not stub.calls
+        text, kwargs = out[0]
+        assert "…dan" in text and "lainnya" in text
+        assert len(text) < 4096, len(text)
+        buttons = [b for row in kwargs["reply_markup"]["inline_keyboard"]
+                   for b in row]
+        assert len(buttons) == K._MAX_LOCATION_CHOICES
+
     def test_callback_sends_weather_and_clears_choices(self, db, sent, monkeypatch):
         from types import SimpleNamespace
         stub = _WeatherStub(monkeypatch)
